@@ -10,13 +10,15 @@ type TcpPose = { x: number; y: number; z: number; rx: number; ry: number; rz: nu
 type IkTarget = Record<'x' | 'y' | 'z' | 'rx' | 'ry' | 'rz', string>;
 
 const JOINTS = [
-  { name: 'J1', label: 'Base', min: -160, max: 160, accent: '#2563eb' },
+  { name: 'J1', label: 'Base', min: -170, max: 170, accent: '#2563eb' },
   { name: 'J2', label: 'Shoulder', min: -42, max: 90, accent: '#7c3aed' },
   { name: 'J3', label: 'Elbow', min: -89, max: 52, accent: '#0891b2' },
-  { name: 'J4', label: 'Wrist roll', min: -180, max: 180, accent: '#059669' },
+  { name: 'J4', label: 'Wrist roll', min: -165, max: 165, accent: '#059669' },
   { name: 'J5', label: 'Wrist bend', min: -105, max: 105, accent: '#d97706' },
-  { name: 'J6', label: 'Tool roll', min: -180, max: 180, accent: '#dc2626' },
+  { name: 'J6', label: 'Tool roll', min: -155, max: 155, accent: '#dc2626' },
 ] as const;
+
+const JOINT_ZERO_OFFSETS: Pose = [Math.PI / 2, 0, 0, 0, 0, 0];
 
 const PRESETS: Record<string, Pose> = {
   Home: [0, -42, 52, 0, 48, 0],
@@ -29,6 +31,7 @@ const TOOL_TIP_OFFSET = 0.0;
 const TOOL_TIP_MARKER_RADIUS = 0.01;
 const TCP_AXIS_LENGTH = 0.05;
 const TCP_AXIS_THICKNESS = 0.005;
+const TCP_FRAME_ROTATION_Z = -Math.PI / 2;
 const LINK_MESHES = [
   ['Link_1_Aluminum.STL', 'Link_1_Motor.STL'],
   ['Link_2_Aluminum.STL', 'Link_2_Motor.STL', 'Link_2_Cover.STL', 'Link_2_Logo.STL'],
@@ -48,7 +51,7 @@ const LINK_MESH_TRANSFORMS = [
 ] as const;
 
 const JOINT_FRAMES = [
-  { xyz: [0, 0, 0.092], rpy: [Math.PI, 0, 0], axis: [0, 0, 1] },
+  { xyz: [0, 0, 0.092], rpy: [Math.PI, 0, 0], axis: [0, 0, -1] },
   { xyz: [0, 0.06415, -0.07778], rpy: [Math.PI / 2, 0, -Math.PI / 2], axis: [0, 0, -1] },
   { xyz: [0, -0.305, 0], rpy: [0, 0, Math.PI], axis: [0, 0, -1] },
   { xyz: [0, 0, 0], rpy: [Math.PI / 2, 0, -Math.PI / 2], axis: [0, 0, -1] },
@@ -67,7 +70,12 @@ function materialFor(name: string) {
 
 function setFrame(object: THREE.Object3D, xyz: readonly number[], rpy: readonly number[]) {
   object.position.set(xyz[0], xyz[1], xyz[2]);
-  object.rotation.set(rpy[0], rpy[1], rpy[2], 'XYZ');
+  object.rotation.set(rpy[0], rpy[1], rpy[2], 'ZYX');
+}
+
+function getTcpWorldQuaternion(end: THREE.Object3D) {
+  const tcpRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), TCP_FRAME_ROTATION_Z);
+  return end.getWorldQuaternion(new THREE.Quaternion()).multiply(tcpRotation);
 }
 
 function rotationVector(from: THREE.Quaternion, to: THREE.Quaternion) {
@@ -178,7 +186,7 @@ export default function RobotSimulator() {
     if (!end) return;
     end.updateWorldMatrix(true, true);
     const point = end.localToWorld(new THREE.Vector3(0, 0, TOOL_TIP_OFFSET));
-    const quaternion = end.getWorldQuaternion(new THREE.Quaternion());
+    const quaternion = getTcpWorldQuaternion(end);
     const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
     setTcp({
       x: point.x * 1000,
@@ -298,6 +306,7 @@ export default function RobotSimulator() {
     const tcpFrame = new THREE.Group();
     tcpFrame.name = 'TCP frame';
     tcpFrame.position.set(0, 0, TOOL_TIP_OFFSET);
+    tcpFrame.rotation.z = TCP_FRAME_ROTATION_Z;
     const toolTipMarker = new THREE.Mesh(toolTipGeometry, toolTipMaterial);
     toolTipMarker.name = 'Tool tip center';
     toolTipMarker.castShadow = true;
@@ -363,7 +372,10 @@ export default function RobotSimulator() {
   }, []);
 
   useEffect(() => {
-    jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(axes.current[index], THREE.MathUtils.degToRad(angles[index])));
+    jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
+      axes.current[index],
+      THREE.MathUtils.degToRad(angles[index]) + JOINT_ZERO_OFFSETS[index],
+    ));
     updateTcp();
   }, [angles, updateTcp, loaded]);
 
@@ -412,12 +424,15 @@ export default function RobotSimulator() {
     const end = jointRotors.current[5];
 
     const applyRadians = (jointValues: number[]) => {
-      jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(axes.current[index], jointValues[index]));
+      jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
+        axes.current[index],
+        jointValues[index] + JOINT_ZERO_OFFSETS[index],
+      ));
       jointRotors.current[0].updateWorldMatrix(true, true);
     };
     const readEndPose = () => {
       const position = end.localToWorld(new THREE.Vector3(0, 0, TOOL_TIP_OFFSET));
-      const quaternion = end.getWorldQuaternion(new THREE.Quaternion());
+      const quaternion = getTcpWorldQuaternion(end);
       return { position, quaternion };
     };
 
@@ -476,7 +491,9 @@ export default function RobotSimulator() {
       return { solved: false, joints, positionError: finalPositionError, orientationError: finalOrientationError };
     };
 
-    const baseDirection = THREE.MathUtils.clamp(Math.atan2(y, x), minimums[0], maximums[0]);
+    const rawBaseDirection = Math.atan2(y, x) - JOINT_ZERO_OFFSETS[0];
+    const normalizedBaseDirection = Math.atan2(Math.sin(rawBaseDirection), Math.cos(rawBaseDirection));
+    const baseDirection = THREE.MathUtils.clamp(normalizedBaseDirection, minimums[0], maximums[0]);
     const seeds = [
       startingRadians,
       PRESETS.Home.map(THREE.MathUtils.degToRad),
