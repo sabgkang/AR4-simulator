@@ -8,6 +8,9 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 type Pose = [number, number, number, number, number, number];
 type TcpPose = { x: number; y: number; z: number; rx: number; ry: number; rz: number };
 type IkTarget = Record<'x' | 'y' | 'z' | 'rx' | 'ry' | 'rz', string>;
+type SettingsCategory = 'com' | 'ranges' | 'motors';
+type JointRange = { min: number; max: number };
+type SerialPortLike = { getInfo: () => { usbVendorId?: number; usbProductId?: number } };
 
 const JOINTS = [
   { name: 'J1', label: 'Base', min: -170, max: 170, accent: '#2563eb' },
@@ -17,6 +20,9 @@ const JOINTS = [
   { name: 'J5', label: 'Wrist bend', min: -105, max: 105, accent: '#d97706' },
   { name: 'J6', label: 'Tool roll', min: -155, max: 155, accent: '#dc2626' },
 ] as const;
+
+const DEFAULT_JOINT_RANGES: JointRange[] = JOINTS.map(({ min, max }) => ({ min, max }));
+const DEFAULT_MOTOR_SPEEDS: Pose = [56.251, 45, 45, 50.224, 114.364, 112.501];
 
 const JOINT_ZERO_OFFSETS: Pose = [Math.PI / 2, 0, 0, 0, 0, 0];
 
@@ -169,6 +175,10 @@ function JointAngleInput({
   );
 }
 
+function GearIcon() {
+  return <span className="gear-icon" aria-hidden="true">⚙</span>;
+}
+
 export default function RobotSimulator() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const jointRotors = useRef<THREE.Group[]>([]);
@@ -183,6 +193,15 @@ export default function RobotSimulator() {
   const [ikMessage, setIkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [loaded, setLoaded] = useState(0);
   const [running, setRunning] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>('com');
+  const [jointRanges, setJointRanges] = useState<JointRange[]>(() => DEFAULT_JOINT_RANGES.map((range) => ({ ...range })));
+  const [motorSpeeds, setMotorSpeeds] = useState<Pose>(DEFAULT_MOTOR_SPEEDS);
+  const [speedPercent, setSpeedPercent] = useState(15);
+  const [accelerationPercent, setAccelerationPercent] = useState(10);
+  const [decelerationPercent, setDecelerationPercent] = useState(10);
+  const [serialPortName, setSerialPortName] = useState('No COM port selected');
+  const [serialMessage, setSerialMessage] = useState<string | null>(null);
 
   const updateTcp = useCallback(() => {
     const end = jointRotors.current[5];
@@ -201,7 +220,7 @@ export default function RobotSimulator() {
     });
   }, []);
 
-  const useCurrentPose = useCallback(() => {
+  const fillCurrentPose = useCallback(() => {
     setIkTarget({
       x: tcp.x.toFixed(1), y: tcp.y.toFixed(1), z: tcp.z.toFixed(1),
       rx: tcp.rx.toFixed(1), ry: tcp.ry.toFixed(1), rz: tcp.rz.toFixed(1),
@@ -212,9 +231,9 @@ export default function RobotSimulator() {
   useEffect(() => {
     if (loaded >= 18 && !ikInitialized.current) {
       ikInitialized.current = true;
-      useCurrentPose();
+      fillCurrentPose();
     }
-  }, [loaded, useCurrentPose]);
+  }, [loaded, fillCurrentPose]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -409,14 +428,14 @@ export default function RobotSimulator() {
   }, [angles, updateTcp, loaded]);
 
   const setJoint = (index: number, value: number) => {
-    const joint = JOINTS[index];
-    const safeValue = Math.min(joint.max, Math.max(joint.min, value));
+    const range = jointRanges[index];
+    const safeValue = Math.min(range.max, Math.max(range.min, value));
     setAngles((current) => current.map((angle, i) => i === index ? safeValue : angle) as Pose);
   };
 
   const moveTo = (target: Pose) => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    const safeTarget = target.map((value, index) => Math.min(JOINTS[index].max, Math.max(JOINTS[index].min, value))) as Pose;
+    const safeTarget = target.map((value, index) => Math.min(jointRanges[index].max, Math.max(jointRanges[index].min, value))) as Pose;
     const start = [...angles] as Pose, started = performance.now(), duration = 700;
     setRunning(true);
     const step = (now: number) => {
@@ -448,8 +467,8 @@ export default function RobotSimulator() {
       'XYZ',
     ));
     const startingRadians = angles.map(THREE.MathUtils.degToRad) as Pose;
-    const minimums = JOINTS.map((joint) => THREE.MathUtils.degToRad(joint.min));
-    const maximums = JOINTS.map((joint) => THREE.MathUtils.degToRad(joint.max));
+    const minimums = jointRanges.map((range) => THREE.MathUtils.degToRad(range.min));
+    const maximums = jointRanges.map((range) => THREE.MathUtils.degToRad(range.max));
     const end = jointRotors.current[5];
 
     const applyRadians = (jointValues: number[]) => {
@@ -574,20 +593,77 @@ export default function RobotSimulator() {
     controls.update();
   };
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSettingsOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [settingsOpen]);
+
+  const requestSerialPort = async () => {
+    const serial = (navigator as Navigator & { serial?: { requestPort: () => Promise<SerialPortLike> } }).serial;
+    if (!serial) {
+      setSerialMessage('Web Serial is unavailable. Open AR4 Studio in desktop Chrome or Edge over HTTPS or localhost.');
+      return;
+    }
+    try {
+      const port = await serial.requestPort();
+      const info = port.getInfo();
+      const vendor = info.usbVendorId?.toString(16).toUpperCase().padStart(4, '0');
+      const product = info.usbProductId?.toString(16).toUpperCase().padStart(4, '0');
+      setSerialPortName(vendor && product ? `Selected port · USB ${vendor}:${product}` : 'Selected serial port');
+      setSerialMessage('Port permission granted.');
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        setSerialMessage('No port selected.');
+      } else {
+        setSerialMessage('Chrome could not access the selected serial port.');
+      }
+    }
+  };
+
+  const updateJointRange = (index: number, key: keyof JointRange, value: number) => {
+    if (!Number.isFinite(value)) return;
+    setJointRanges((current) => current.map((range, rangeIndex) => {
+      if (rangeIndex !== index) return range;
+      if (key === 'min') return { ...range, min: Math.min(value, range.max - 0.1) };
+      return { ...range, max: Math.max(value, range.min + 0.1) };
+    }));
+  };
+
+  const updateMotorSpeed = (index: number, value: number) => {
+    if (!Number.isFinite(value)) return;
+    setMotorSpeeds((current) => current.map((speed, speedIndex) => speedIndex === index
+      ? Math.min(DEFAULT_MOTOR_SPEEDS[index], Math.max(0, value))
+      : speed) as Pose);
+  };
+
+  const resetJointRanges = () => {
+    setJointRanges(DEFAULT_JOINT_RANGES.map((range) => ({ ...range })));
+    setAngles((current) => current.map((angle, index) => Math.min(DEFAULT_JOINT_RANGES[index].max, Math.max(DEFAULT_JOINT_RANGES[index].min, angle))) as Pose);
+  };
+
+  const resetMotorSettings = () => {
+    setMotorSpeeds(DEFAULT_MOTOR_SPEEDS);
+    setSpeedPercent(15);
+    setAccelerationPercent(10);
+    setDecelerationPercent(10);
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-mark">AR</div>
         <div className="brand-copy"><strong>AR4 Studio</strong><span>MK5 digital twin</span></div>
         <div className="connection"><i /> Simulation online</div>
-        <div className="top-actions"><button onClick={resetView}>Reset view</button><button className="primary" onClick={() => moveTo(PRESETS.Home)}>Home pose</button></div>
+        <div className="top-actions">
+          <button className="settings-button" type="button" aria-label="Open settings" title="Settings" onClick={() => setSettingsOpen(true)}><GearIcon /></button>
+        </div>
       </header>
 
       <section className="workspace">
-        <aside className="rail" aria-label="Simulator navigation">
-          <button className="rail-button active" aria-label="Robot view">R</button><button className="rail-button" aria-label="Programs">P</button><button className="rail-button" aria-label="Diagnostics">D</button><span className="rail-spacer" /><button className="rail-button" aria-label="Settings">S</button>
-        </aside>
-
         <section className="viewport-card">
           <div className="viewport-head">
             <div><span className="eyebrow">LIVE MODEL</span><h1>AR4 MK5</h1></div>
@@ -618,10 +694,11 @@ export default function RobotSimulator() {
           <div className="panel-heading"><div><span className="eyebrow">MANUAL CONTROL</span><h2>Joint positions</h2></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
           <div className="joint-list">
             {JOINTS.map((joint, index) => {
-              const progress = ((angles[index] - joint.min) / (joint.max - joint.min)) * 100;
+              const range = jointRanges[index];
+              const progress = ((angles[index] - range.min) / (range.max - range.min)) * 100;
               return <div className="joint-control" key={joint.name}>
-                <div className="joint-label"><span className="joint-id" style={{ background: joint.accent }}>{joint.name}</span><span><strong>{joint.label}</strong><small>{joint.min}° to {joint.max}°</small></span><JointAngleInput name={joint.name} value={angles[index]} min={joint.min} max={joint.max} onChange={(value) => setJoint(index, value)} /></div>
-                <input aria-label={`${joint.name} ${joint.label}`} type="range" min={joint.min} max={joint.max} step="1" value={angles[index]} onChange={(event) => setJoint(index, Number(event.target.value))} style={{ '--range': `${progress}%`, '--accent': joint.accent } as React.CSSProperties} />
+                <div className="joint-label"><span className="joint-id" style={{ background: joint.accent }}>{joint.name}</span><span><strong>{joint.label}</strong><small>{range.min}° to {range.max}°</small></span><JointAngleInput name={joint.name} value={angles[index]} min={range.min} max={range.max} onChange={(value) => setJoint(index, value)} /></div>
+                <input aria-label={`${joint.name} ${joint.label}`} type="range" min={range.min} max={range.max} step="1" value={angles[index]} onChange={(event) => setJoint(index, Number(event.target.value))} style={{ '--range': `${progress}%`, '--accent': joint.accent } as React.CSSProperties} />
               </div>;
             })}
           </div>
@@ -633,7 +710,7 @@ export default function RobotSimulator() {
         <aside className="ik-panel">
           <div className="panel-heading">
             <div><span className="eyebrow">CARTESIAN TARGET</span><h2>Inverse kinematics</h2></div>
-            <button type="button" className="current-pose-button" onClick={useCurrentPose}>Use current</button>
+            <button type="button" className="current-pose-button" onClick={fillCurrentPose}>Use current</button>
           </div>
           <form className="ik-section" onSubmit={(event) => { event.preventDefault(); solveInverseKinematics(); }}>
             <div className="ik-grid">
@@ -659,6 +736,65 @@ export default function RobotSimulator() {
           </form>
         </aside>
       </section>
+
+      {settingsOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+        <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <header className="settings-header">
+            <div><span className="eyebrow">AR4 STUDIO</span><h2 id="settings-title">Settings</h2></div>
+            <button className="modal-close" type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button>
+          </header>
+          <div className="settings-layout">
+            <nav className="settings-nav" aria-label="Settings categories">
+              <button className={settingsCategory === 'com' ? 'active' : ''} onClick={() => setSettingsCategory('com')}><span>COM</span><small>Serial connection</small></button>
+              <button className={settingsCategory === 'ranges' ? 'active' : ''} onClick={() => setSettingsCategory('ranges')}><span>Joint ranges</span><small>Motion limits</small></button>
+              <button className={settingsCategory === 'motors' ? 'active' : ''} onClick={() => setSettingsCategory('motors')}><span>Motors</span><small>Speed profile</small></button>
+            </nav>
+            <div className="settings-content">
+              {settingsCategory === 'com' && <div className="settings-page">
+                <div className="settings-page-title"><div><h3>COM port</h3><p>Select the AR4 Teensy controller.</p></div></div>
+                <label className="setting-field serial-field">
+                  <span>COM port</span>
+                  <button type="button" className="serial-select" onClick={requestSerialPort}><strong>{serialPortName}</strong><i aria-hidden="true">⌄</i></button>
+                </label>
+                {serialMessage && <p className="settings-note" role="status">{serialMessage}</p>}
+              </div>}
+
+              {settingsCategory === 'ranges' && <div className="settings-page">
+                <div className="settings-page-title"><div><h3>Joint ranges</h3><p>Set the permitted angular travel for each joint.</p></div><button className="default-button" type="button" onClick={resetJointRanges}>Default</button></div>
+                <div className="settings-table range-table">
+                  <div className="settings-table-head"><span>Joint</span><span>Minimum</span><span>Maximum</span></div>
+                  {JOINTS.map((joint, index) => <div className="settings-table-row" key={joint.name}>
+                    <strong><i style={{ background: joint.accent }} />{joint.name}</strong>
+                    <label><input aria-label={`${joint.name} minimum range`} type="number" step="0.1" max={jointRanges[index].max} value={jointRanges[index].min} onChange={(event) => updateJointRange(index, 'min', Number(event.target.value))} /><small>deg</small></label>
+                    <label><input aria-label={`${joint.name} maximum range`} type="number" step="0.1" min={jointRanges[index].min} value={jointRanges[index].max} onChange={(event) => updateJointRange(index, 'max', Number(event.target.value))} /><small>deg</small></label>
+                  </div>)}
+                </div>
+              </div>}
+
+              {settingsCategory === 'motors' && <div className="settings-page">
+                <div className="settings-page-title"><div><h3>Motors</h3><p>Configure joint speed limits and the default motion profile.</p></div><button className="default-button" type="button" onClick={resetMotorSettings}>Default</button></div>
+                <div className="settings-table motor-table">
+                  <div className="settings-table-head"><span>Motor</span><span>Maximum speed</span></div>
+                  {JOINTS.map((joint, index) => <div className="settings-table-row" key={joint.name}>
+                    <strong><i style={{ background: joint.accent }} />{joint.name}</strong>
+                    <label><input aria-label={`${joint.name} maximum speed`} type="number" min="0" max={DEFAULT_MOTOR_SPEEDS[index]} step="0.001" value={motorSpeeds[index]} onChange={(event) => updateMotorSpeed(index, Number(event.target.value))} /><small>deg/s</small></label>
+                  </div>)}
+                </div>
+                <div className="profile-settings">
+                  {([
+                    ['Speed Percentage %', speedPercent, setSpeedPercent, 15],
+                    ['Acceleration Percentage %', accelerationPercent, setAccelerationPercent, 10],
+                    ['Deceleration Percentage %', decelerationPercent, setDecelerationPercent, 10],
+                  ] as const).map(([label, value, setter, defaultValue]) => <label className="profile-row" key={label}>
+                    <span><strong>{label}</strong><small>Default {defaultValue}% · Maximum 100%</small></span>
+                    <span className="percent-input"><input type="number" min="0" max="100" step="1" value={value} onChange={(event) => setter(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /><small>%</small></span>
+                  </label>)}
+                </div>
+              </div>}
+            </div>
+          </div>
+        </section>
+      </div>}
     </main>
   );
 }
