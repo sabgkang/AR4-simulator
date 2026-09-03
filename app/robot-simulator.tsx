@@ -604,7 +604,13 @@ export default function RobotSimulator() {
             </div>
           </div>
           <div className="telemetry-strip">
-            <div><span>X</span><strong>{tcp.x.toFixed(1)}</strong><small>mm</small></div><div><span>Y</span><strong>{tcp.y.toFixed(1)}</strong><small>mm</small></div><div><span>Z</span><strong>{tcp.z.toFixed(1)}</strong><small>mm</small></div><div className="status-cell"><i /><strong>{running ? 'Moving' : 'Holding'}</strong></div>
+            <div><span>X</span><strong>{tcp.x.toFixed(1)}</strong><small>mm</small></div>
+            <div><span>Y</span><strong>{tcp.y.toFixed(1)}</strong><small>mm</small></div>
+            <div><span>Z</span><strong>{tcp.z.toFixed(1)}</strong><small>mm</small></div>
+            <div><span>θx</span><strong>{tcp.rx.toFixed(1)}</strong><small>deg</small></div>
+            <div><span>θy</span><strong>{tcp.ry.toFixed(1)}</strong><small>deg</small></div>
+            <div><span>θz</span><strong>{tcp.rz.toFixed(1)}</strong><small>deg</small></div>
+            <div className="status-cell"><i /><strong>{running ? 'Moving' : 'Holding'}</strong></div>
           </div>
         </section>
 
