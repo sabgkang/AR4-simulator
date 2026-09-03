@@ -4,6 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { createJointMotion, DEFAULT_MAX_SPEEDS, type JointValues } from './teensy-motion';
+import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint } from './teensy-linear-motion';
+import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
 
 type Pose = [number, number, number, number, number, number];
 type TcpPose = { x: number; y: number; z: number; rx: number; ry: number; rz: number };
@@ -11,6 +14,19 @@ type IkTarget = Record<'x' | 'y' | 'z' | 'rx' | 'ry' | 'rz', string>;
 type SettingsCategory = 'com' | 'ranges' | 'motors';
 type JointRange = { min: number; max: number };
 type SerialPortLike = { getInfo: () => { usbVendorId?: number; usbProductId?: number } };
+type MoveJointsCommand = { cmd: 'move_joints'; j: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number };
+type MoveJCommand = { cmd: 'move_j'; pose: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
+type MoveLCommand = { cmd: 'move_l'; pose: number[]; ext?: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; rounding?: number; w?: string };
+type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
+type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
+type RobotPositionResponse = ReturnType<typeof createPositionResponse>;
+type CommandResponse = typeof HELLO_RESPONSE | RobotPositionResponse | { msg: 'error'; data: string };
+
+declare global {
+  interface Window {
+    ar4Simulator?: { executeCommand: (command: unknown) => Promise<CommandResponse> };
+  }
+}
 
 const JOINTS = [
   { name: 'J1', label: 'Base', min: -170, max: 170, accent: '#2563eb' },
@@ -22,7 +38,7 @@ const JOINTS = [
 ] as const;
 
 const DEFAULT_JOINT_RANGES: JointRange[] = JOINTS.map(({ min, max }) => ({ min, max }));
-const DEFAULT_MOTOR_SPEEDS: Pose = [56.251, 45, 45, 50.224, 114.364, 112.501];
+const DEFAULT_MOTOR_SPEEDS: Pose = DEFAULT_MAX_SPEEDS.slice(0, 6) as Pose;
 
 const JOINT_ZERO_OFFSETS: Pose = [Math.PI / 2, 0, 0, 0, 0, 0];
 
@@ -116,6 +132,10 @@ function solveLinearSystem(matrix: number[][], vector: number[]) {
   return augmented.map((row) => row[size]);
 }
 
+function angularDifferenceDegrees(value: number, reference: number) {
+  return ((value - reference + 540) % 360) - 180;
+}
+
 function JointAngleInput({
   name,
   value,
@@ -186,6 +206,10 @@ export default function RobotSimulator() {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const animationRef = useRef<number | null>(null);
+  const anglesRef = useRef<Pose>(PRESETS.Home);
+  const tcpRef = useRef<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
+  const externalAxesRef = useRef<[number, number, number]>([0, 0, 0]);
+  const runningRef = useRef(false);
   const ikInitialized = useRef(false);
   const [angles, setAngles] = useState<Pose>(PRESETS.Home);
   const [tcp, setTcp] = useState<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
@@ -193,6 +217,8 @@ export default function RobotSimulator() {
   const [ikMessage, setIkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [loaded, setLoaded] = useState(0);
   const [running, setRunning] = useState(false);
+  const [activeTestCommand, setActiveTestCommand] = useState<TestCommandName | null>(null);
+  const [commandOutput, setCommandOutput] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>('com');
   const [jointRanges, setJointRanges] = useState<JointRange[]>(() => DEFAULT_JOINT_RANGES.map((range) => ({ ...range })));
@@ -210,14 +236,46 @@ export default function RobotSimulator() {
     const point = end.localToWorld(new THREE.Vector3(0, 0, TOOL_TIP_OFFSET));
     const quaternion = getTcpWorldQuaternion(end);
     const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
-    setTcp({
+    const nextTcp = {
       x: point.x * 1000,
       y: point.y * 1000,
       z: point.z * 1000,
       rx: THREE.MathUtils.radToDeg(euler.x),
       ry: THREE.MathUtils.radToDeg(euler.y),
       rz: THREE.MathUtils.radToDeg(euler.z),
-    });
+    };
+    tcpRef.current = nextTcp;
+    setTcp(nextTcp);
+  }, []);
+
+  const getPoseForJoints = useCallback((jointValues: Pose) => {
+    if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
+      throw new Error('The robot model is still loading. Try again in a moment.');
+    }
+    const displayedJoints = [...anglesRef.current] as Pose;
+    const applyJoints = (values: Pose) => {
+      jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
+        axes.current[index],
+        THREE.MathUtils.degToRad(values[index]) + JOINT_ZERO_OFFSETS[index],
+      ));
+      jointRotors.current[0].updateWorldMatrix(true, true);
+    };
+    try {
+      applyJoints(jointValues);
+      const end = jointRotors.current[5];
+      const point = end.localToWorld(new THREE.Vector3(0, 0, TOOL_TIP_OFFSET));
+      const euler = new THREE.Euler().setFromQuaternion(getTcpWorldQuaternion(end), 'XYZ');
+      return [
+        point.x * 1000,
+        point.y * 1000,
+        point.z * 1000,
+        THREE.MathUtils.radToDeg(euler.x),
+        THREE.MathUtils.radToDeg(euler.y),
+        THREE.MathUtils.radToDeg(euler.z),
+      ] as Pose;
+    } finally {
+      applyJoints(displayedJoints);
+    }
   }, []);
 
   const fillCurrentPose = useCallback(() => {
@@ -420,6 +478,7 @@ export default function RobotSimulator() {
   }, []);
 
   useEffect(() => {
+    anglesRef.current = angles;
     jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
       axes.current[index],
       THREE.MathUtils.degToRad(angles[index]) + JOINT_ZERO_OFFSETS[index],
@@ -428,34 +487,33 @@ export default function RobotSimulator() {
   }, [angles, updateTcp, loaded]);
 
   const setJoint = (index: number, value: number) => {
+    if (runningRef.current) return;
     const range = jointRanges[index];
     const safeValue = Math.min(range.max, Math.max(range.min, value));
     setAngles((current) => current.map((angle, i) => i === index ? safeValue : angle) as Pose);
   };
 
   const moveTo = (target: Pose) => {
+    if (runningRef.current) return;
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     const safeTarget = target.map((value, index) => Math.min(jointRanges[index].max, Math.max(jointRanges[index].min, value))) as Pose;
     const start = [...angles] as Pose, started = performance.now(), duration = 700;
+    runningRef.current = true;
     setRunning(true);
     const step = (now: number) => {
       const raw = Math.min((now - started) / duration, 1), eased = 1 - Math.pow(1 - raw, 3);
       setAngles(start.map((value, i) => value + (safeTarget[i] - value) * eased) as Pose);
-      if (raw < 1) animationRef.current = requestAnimationFrame(step); else setRunning(false);
+      if (raw < 1) animationRef.current = requestAnimationFrame(step); else {
+        runningRef.current = false;
+        setRunning(false);
+      }
     };
     animationRef.current = requestAnimationFrame(step);
   };
 
-  const solveInverseKinematics = () => {
-    const keys: Array<keyof IkTarget> = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
-    const values = keys.map((key) => Number(ikTarget[key]));
-    if (values.some((value, index) => ikTarget[keys[index]].trim() === '' || !Number.isFinite(value))) {
-      setIkMessage({ type: 'error', text: 'Enter a valid number in all six pose fields.' });
-      return;
-    }
+  const solvePose = useCallback((values: Pose, wristConfiguration = 'A', referenceJoints: Pose = anglesRef.current, preferContinuation = false) => {
     if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
-      setIkMessage({ type: 'error', text: 'The robot model is still loading. Try again in a moment.' });
-      return;
+      throw new Error('The robot model is still loading. Try again in a moment.');
     }
 
     const [x, y, z, rx, ry, rz] = values;
@@ -466,7 +524,11 @@ export default function RobotSimulator() {
       THREE.MathUtils.degToRad(rz),
       'XYZ',
     ));
-    const startingRadians = angles.map(THREE.MathUtils.degToRad) as Pose;
+    const startingDegrees = [...referenceJoints] as Pose;
+    const startingRadians = startingDegrees.map(THREE.MathUtils.degToRad) as Pose;
+    const displayedRadians = anglesRef.current.map(THREE.MathUtils.degToRad) as Pose;
+    const positionTolerance = preferContinuation ? 0.00015 : 0.0015;
+    const orientationTolerance = THREE.MathUtils.degToRad(preferContinuation ? 0.15 : 1.5);
     const minimums = jointRanges.map((range) => THREE.MathUtils.degToRad(range.min));
     const maximums = jointRanges.map((range) => THREE.MathUtils.degToRad(range.max));
     const end = jointRotors.current[5];
@@ -495,7 +557,7 @@ export default function RobotSimulator() {
         const orientationError = rotationVector(current.quaternion, targetQuaternion);
         finalPositionError = positionError.length();
         finalOrientationError = orientationError.length();
-        if (finalPositionError < 0.0015 && finalOrientationError < THREE.MathUtils.degToRad(1.5)) {
+        if (finalPositionError < positionTolerance && finalOrientationError < orientationTolerance) {
           return { solved: true, joints, positionError: finalPositionError, orientationError: finalOrientationError };
         }
 
@@ -542,29 +604,96 @@ export default function RobotSimulator() {
     const rawBaseDirection = Math.atan2(y, x) - JOINT_ZERO_OFFSETS[0];
     const normalizedBaseDirection = Math.atan2(Math.sin(rawBaseDirection), Math.cos(rawBaseDirection));
     const baseDirection = THREE.MathUtils.clamp(normalizedBaseDirection, minimums[0], maximums[0]);
-    const seeds = [
-      startingRadians,
+    const fallbackSeeds = [
       PRESETS.Home.map(THREE.MathUtils.degToRad),
       PRESETS.Upright.map(THREE.MathUtils.degToRad),
       [baseDirection, THREE.MathUtils.degToRad(20), THREE.MathUtils.degToRad(-20), 0, 0, 0],
     ];
-    let best = attempt(seeds[0]);
-    for (let index = 1; index < seeds.length && !best.solved; index += 1) {
-      const candidate = attempt(seeds[index]);
-      const candidateScore = candidate.positionError + candidate.orientationError * 0.15;
-      const bestScore = best.positionError + best.orientationError * 0.15;
-      if (candidate.solved || candidateScore < bestScore) best = candidate;
-    }
+    const wristSeeds = [-90, -45, 45, 90].map((j5) => {
+      const seed = [...startingRadians];
+      seed[4] = THREE.MathUtils.degToRad(j5);
+      return seed;
+    });
 
-    applyRadians(startingRadians);
-    if (!best.solved) {
-      setIkMessage({ type: 'error', text: 'No IK solution was found within the official MK5 joint limits. Try a closer position or a different orientation.' });
+    try {
+      const wrist = wristConfiguration.trim().toUpperCase().charAt(0) || 'A';
+      const currentWristSign = Math.abs(startingDegrees[4]) > 0.5 ? Math.sign(startingDegrees[4]) : 1;
+      const desiredWristSign = wrist === 'F' ? 1 : wrist === 'N' ? -1 : currentWristSign;
+      const evaluateCandidate = (candidate: ReturnType<typeof attempt>) => {
+        const degrees = candidate.joints.map(THREE.MathUtils.radToDeg) as Pose;
+        const absoluteJ5 = Math.abs(degrees[4]);
+        const wristSign = absoluteJ5 > 0.5 ? Math.sign(degrees[4]) : 0;
+        let cost = degrees.reduce((total, value, joint) => total + Math.abs(angularDifferenceDegrees(value, startingDegrees[joint])), 0);
+        if (wrist === 'F' || wrist === 'N') {
+          if (absoluteJ5 > 2 && wristSign !== desiredWristSign) return null;
+          if (absoluteJ5 <= 2 && wristSign !== 0 && wristSign !== desiredWristSign) cost += 200;
+        } else if (wrist === 'A') {
+          if (absoluteJ5 > 2 && wristSign !== 0 && wristSign !== desiredWristSign) cost += 20;
+        } else if (absoluteJ5 > 2 && wristSign !== 0 && wristSign !== desiredWristSign) {
+          return null;
+        }
+        if (absoluteJ5 <= 2) {
+          cost += 5 * Math.abs(angularDifferenceDegrees(degrees[3] + degrees[5], startingDegrees[3] + startingDegrees[5]));
+        }
+        return { candidate, degrees, cost };
+      };
+
+      const continuation = attempt(startingRadians);
+      const continued = continuation.solved ? evaluateCandidate(continuation) : null;
+      if (preferContinuation && continued) {
+        return {
+          joints: continued.degrees,
+          positionError: continuation.positionError,
+          orientationError: continuation.orientationError,
+        };
+      }
+
+      const attempts = [continuation, ...[...fallbackSeeds, ...wristSeeds].map(attempt)];
+      const solved = attempts.filter((candidate) => candidate.solved).filter((candidate, index, candidates) => {
+        const degrees = candidate.joints.map(THREE.MathUtils.radToDeg);
+        return candidates.findIndex((other) => other.joints.every((value, joint) =>
+          Math.abs(angularDifferenceDegrees(THREE.MathUtils.radToDeg(value), degrees[joint])) < 0.2,
+        )) === index;
+      });
+      if (solved.length === 0) {
+        throw new Error('No IK solution was found within the configured joint limits. Try a closer position or a different orientation.');
+      }
+
+      const candidates = solved.map(evaluateCandidate).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+
+      const fallback = solved.map((candidate) => ({
+        candidate,
+        degrees: candidate.joints.map(THREE.MathUtils.radToDeg) as Pose,
+        cost: candidate.joints.reduce((total, value, joint) =>
+          total + Math.abs(angularDifferenceDegrees(THREE.MathUtils.radToDeg(value), startingDegrees[joint])), 0),
+      }));
+      const best = (candidates.length > 0 ? candidates : fallback).reduce((selected, candidate) =>
+        candidate.cost < selected.cost ? candidate : selected,
+      );
+      return {
+        joints: best.degrees,
+        positionError: best.candidate.positionError,
+        orientationError: best.candidate.orientationError,
+      };
+    } finally {
+      applyRadians(displayedRadians);
+    }
+  }, [jointRanges]);
+
+  const solveInverseKinematics = () => {
+    const keys: Array<keyof IkTarget> = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
+    const values = keys.map((key) => Number(ikTarget[key]));
+    if (values.some((value, index) => ikTarget[keys[index]].trim() === '' || !Number.isFinite(value))) {
+      setIkMessage({ type: 'error', text: 'Enter a valid number in all six pose fields.' });
       return;
     }
-
-    const solvedDegrees = best.joints.map((value) => THREE.MathUtils.radToDeg(value)) as Pose;
-    setIkMessage({ type: 'success', text: `Solution found · position error ${(best.positionError * 1000).toFixed(2)} mm · orientation error ${THREE.MathUtils.radToDeg(best.orientationError).toFixed(2)}°` });
-    moveTo(solvedDegrees);
+    try {
+      const solution = solvePose(values as Pose);
+      setIkMessage({ type: 'success', text: `Solution found · position error ${(solution.positionError * 1000).toFixed(2)} mm · orientation error ${THREE.MathUtils.radToDeg(solution.orientationError).toFixed(2)}°` });
+      moveTo(solution.joints);
+    } catch (error) {
+      setIkMessage({ type: 'error', text: error instanceof Error ? error.message : 'No IK solution was found.' });
+    }
   };
 
   const resetView = () => {
@@ -652,13 +781,255 @@ export default function RobotSimulator() {
     setDecelerationPercent(10);
   };
 
+  useEffect(() => {
+    const executeCommand = async (rawCommand: unknown): Promise<CommandResponse> => {
+      try {
+        const decodedCommand = typeof rawCommand === 'string' ? JSON.parse(rawCommand) as unknown : rawCommand;
+        if (!decodedCommand || typeof decodedCommand !== 'object') {
+          throw new Error('Unsupported command.');
+        }
+        const commandName = (decodedCommand as { cmd?: unknown }).cmd;
+        if (commandName === 'hello') return HELLO_RESPONSE;
+        if (commandName === 'get_position') {
+          const joints = [...anglesRef.current, ...externalAxesRef.current] as JointValues;
+          const currentTcp = jointRotors.current.length === 6
+            ? getPoseForJoints(anglesRef.current)
+            : [tcpRef.current.x, tcpRef.current.y, tcpRef.current.z, tcpRef.current.rx, tcpRef.current.ry, tcpRef.current.rz] as Pose;
+          return createPositionResponse(joints, currentTcp as TcpValues);
+        }
+        if (commandName === 'calibrate') {
+          throw new Error('calibrate is a hardware homing operation and is not available in the simulator.');
+        }
+        if (runningRef.current) throw new Error('Robot is already moving.');
+
+        const command = decodedCommand as MotionCommand;
+        if (command.cmd !== 'move_joints' && command.cmd !== 'move_j' && command.cmd !== 'move_l') throw new Error('Unsupported command.');
+        if (command.ramp !== undefined && !Number.isFinite(command.ramp)) throw new Error('ramp must be a finite number.');
+        if ((command.spd_type ?? 'percent') !== 'percent') {
+          throw new Error(`${command.cmd} currently supports spd_type "percent" only.`);
+        }
+
+        let target: JointValues;
+        let motion: { durationMs: number; sample: (elapsedMs: number) => JointValues };
+        const start = [...anglesRef.current, ...externalAxesRef.current] as JointValues;
+        const configuredMaxSpeeds = [...motorSpeeds, ...DEFAULT_MAX_SPEEDS.slice(6)] as JointValues;
+        if (command.cmd === 'move_joints') {
+          if (!Array.isArray(command.j) || command.j.length !== 9 || command.j.some((value) => !Number.isFinite(value))) {
+            throw new Error('move_joints requires nine finite joint values.');
+          }
+          target = [...command.j] as JointValues;
+          motion = createJointMotion({
+            start,
+            target,
+            maxSpeeds: configuredMaxSpeeds,
+            speedPercent: command.spd ?? speedPercent,
+            accelerationPercent: command.acc ?? accelerationPercent,
+            decelerationPercent: command.dec ?? decelerationPercent,
+            ramp: command.ramp ?? 10,
+          });
+        } else if (command.cmd === 'move_j') {
+          if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
+            throw new Error('move_j requires six finite pose values.');
+          }
+          const solution = solvePose([...command.pose] as Pose, command.w ?? 'A');
+          target = [...solution.joints, ...externalAxesRef.current] as JointValues;
+          motion = createJointMotion({
+            start,
+            target,
+            maxSpeeds: configuredMaxSpeeds,
+            speedPercent: command.spd ?? speedPercent,
+            accelerationPercent: command.acc ?? accelerationPercent,
+            decelerationPercent: command.dec ?? decelerationPercent,
+            ramp: command.ramp ?? 10,
+          });
+        } else {
+          if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
+            throw new Error('move_l requires six finite pose values.');
+          }
+          if (command.ext !== undefined && (!Array.isArray(command.ext) || command.ext.length !== 3 || command.ext.some((value) => !Number.isFinite(value)))) {
+            throw new Error('move_l ext requires three finite values.');
+          }
+          if (command.rounding !== undefined && (!Number.isFinite(command.rounding) || command.rounding < 0)) {
+            throw new Error('rounding must be a non-negative finite number.');
+          }
+          if ((command.rounding ?? 0) > 0) {
+            throw new Error('move_l rounding greater than 0 requires command-queue lookahead and is not supported yet.');
+          }
+          const linearSpeed = command.spd ?? speedPercent;
+          const linearAcceleration = command.acc ?? accelerationPercent;
+          const linearDeceleration = command.dec ?? decelerationPercent;
+          const linearRamp = command.ramp ?? 80;
+          if (!Number.isFinite(linearSpeed) || linearSpeed <= 0 || linearSpeed > 100) throw new Error('spd must be greater than 0 and no more than 100.');
+          if (!Number.isFinite(linearAcceleration) || linearAcceleration < 0 || linearAcceleration > 100) throw new Error('acc must be between 0 and 100.');
+          if (!Number.isFinite(linearDeceleration) || linearDeceleration < 0 || linearDeceleration > 100) throw new Error('dec must be between 0 and 100.');
+          if (!Number.isFinite(linearRamp) || linearRamp <= 0 || linearRamp > 100) throw new Error('ramp must be between 0 and 100.');
+
+          runningRef.current = true;
+          setRunning(true);
+          const startTcp = tcpRef.current;
+          const startPose: CartesianPose = [startTcp.x, startTcp.y, startTcp.z, startTcp.rx, startTcp.ry, startTcp.rz];
+          const targetPose = [...command.pose] as CartesianPose;
+          const startExternal = [...externalAxesRef.current] as ExternalAxes;
+          const targetExternal = command.ext ? [...command.ext] as ExternalAxes : [...startExternal] as ExternalAxes;
+          targetExternal.forEach((value, index) => {
+            if (value < 0 || value > 3450) throw new Error(`J${index + 7} target is outside the firmware range 0 to 3450.`);
+          });
+
+          const cartesianWaypoints = buildLinearWaypoints(startPose, targetPose, startExternal, targetExternal);
+          const jointWaypoints: LinearJointWaypoint[] = [];
+          let referenceJoints = [...anglesRef.current] as Pose;
+          for (let index = 0; index < cartesianWaypoints.length; index += 1) {
+            const waypoint = cartesianWaypoints[index];
+            const solution = solvePose(waypoint.pose, command.w ?? 'A', referenceJoints, true);
+            referenceJoints = solution.joints;
+            jointWaypoints.push({
+              progress: waypoint.progress,
+              joints: [...solution.joints, ...waypoint.external] as JointValues,
+            });
+            if ((index + 1) % 20 === 0) {
+              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            }
+          }
+          motion = createLinearMotionSequence({
+            start,
+            waypoints: jointWaypoints,
+            maxSpeeds: configuredMaxSpeeds,
+            speedPercent: linearSpeed,
+            accelerationPercent: linearAcceleration,
+            decelerationPercent: linearDeceleration,
+            ramp: linearRamp,
+          });
+          target = motion.sample(motion.durationMs);
+        }
+
+        for (let index = 0; index < 6; index += 1) {
+          const range = jointRanges[index];
+          if (target[index] < range.min || target[index] > range.max) {
+            throw new Error(`J${index + 1} target is outside its configured range.`);
+          }
+        }
+        for (let index = 6; index < 9; index += 1) {
+          if (target[index] < 0 || target[index] > 3450) {
+            throw new Error(`J${index + 1} target is outside the firmware range 0 to 3450.`);
+          }
+        }
+
+        if (motion.durationMs === 0) {
+          runningRef.current = false;
+          setRunning(false);
+          return {
+            msg: 'robot_pos', j: target.slice(0, 6),
+            pose: [tcpRef.current.x, tcpRef.current.y, tcpRef.current.z, tcpRef.current.rx, tcpRef.current.ry, tcpRef.current.rz, ...target.slice(6)],
+            speed_violation: 0, debug: '', flag: '',
+          };
+        }
+
+        runningRef.current = true;
+        setRunning(true);
+        const started = performance.now();
+        await new Promise<void>((resolve) => {
+          const animate = (now: number) => {
+            const values = motion.sample(now - started);
+            const robotJoints = values.slice(0, 6) as Pose;
+            anglesRef.current = robotJoints;
+            externalAxesRef.current = values.slice(6) as [number, number, number];
+            setAngles(robotJoints);
+            if (now - started < motion.durationMs) animationRef.current = requestAnimationFrame(animate);
+            else resolve();
+          };
+          animationRef.current = requestAnimationFrame(animate);
+        });
+        runningRef.current = false;
+        setRunning(false);
+
+        // Let React apply the final joint transforms before reading the TCP.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        const finalTcp = tcpRef.current;
+        return {
+          msg: 'robot_pos',
+          j: [...anglesRef.current],
+          pose: [finalTcp.x, finalTcp.y, finalTcp.z, finalTcp.rx, finalTcp.ry, finalTcp.rz, ...externalAxesRef.current],
+          speed_violation: 0,
+          debug: '',
+          flag: '',
+        };
+      } catch (error) {
+        runningRef.current = false;
+        setRunning(false);
+        return { msg: 'error', data: error instanceof Error ? error.message : 'Invalid command.' };
+      }
+    };
+
+    window.ar4Simulator = { executeCommand };
+    return () => { delete window.ar4Simulator; };
+  }, [accelerationPercent, decelerationPercent, getPoseForJoints, jointRanges, motorSpeeds, solvePose, speedPercent]);
+
+  const runTestCommand = async (commandName: TestCommandName) => {
+    const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
+    if ((isMotionCommand && runningRef.current) || (commandName !== 'hello' && loaded < 18)) return;
+    const executeCommand = window.ar4Simulator?.executeCommand;
+    if (!executeCommand) return;
+    setActiveTestCommand(commandName);
+    setIkMessage(null);
+    try {
+      const profile = {
+        spd_type: 'percent',
+        spd: speedPercent,
+        acc: accelerationPercent,
+        dec: decelerationPercent,
+      } as const;
+      let command: unknown;
+      if (commandName === 'hello' || commandName === 'get_position') {
+        command = { cmd: commandName };
+      } else if (commandName === 'move_joints') {
+        command = { cmd: 'move_joints', j: [0, 0, 0, 0, 0, 0, 0, 0, 0], ...profile };
+      } else {
+        const homePose = getPoseForJoints(PRESETS.Home);
+        command = commandName === 'move_j'
+          ? { cmd: 'move_j', pose: homePose, w: 'A', ...profile }
+          : { cmd: 'move_l', pose: homePose, ext: [0, 0, 0], rounding: 0, w: 'A', ...profile };
+      }
+      const response = await executeCommand(command);
+      setCommandOutput(JSON.stringify(response));
+      if ('msg' in response && response.msg === 'error') throw new Error(response.data);
+      if (isMotionCommand) setIkMessage({ type: 'success', text: `${commandName} test completed at Home.` });
+    } catch (error) {
+      const message = `${commandName} test failed: ${error instanceof Error ? error.message : 'Unknown error.'}`;
+      setCommandOutput(JSON.stringify({ msg: 'error', data: message }));
+      setIkMessage({ type: 'error', text: message });
+    } finally {
+      setActiveTestCommand(null);
+    }
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-mark">AR</div>
         <div className="brand-copy"><strong>AR4 Studio</strong><span>MK5 digital twin</span></div>
         <div className="connection"><i /> Simulation online</div>
+        <div className="command-output">
+          <output aria-live="polite" title={commandOutput}>{commandOutput}</output>
+          {commandOutput && (
+            <button type="button" aria-label="Clear command response" title="Clear" onClick={() => setCommandOutput('')}>X</button>
+          )}
+        </div>
         <div className="top-actions">
+          {(['hello', 'get_position', 'move_joints', 'move_j', 'move_l'] as TestCommandName[]).map((commandName) => {
+            const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
+            return (
+            <button
+              className="command-test-button"
+              type="button"
+              key={commandName}
+              disabled={(isMotionCommand && running) || (commandName !== 'hello' && loaded < 18)}
+              aria-label={isMotionCommand ? `Test ${commandName} command to Home` : `Test ${commandName} command`}
+              title={isMotionCommand ? `Run ${commandName} to Home` : `Run ${commandName}`}
+              onClick={() => { void runTestCommand(commandName); }}
+            >
+              {activeTestCommand === commandName ? 'Running…' : commandName}
+            </button>
+          );})}
           <button className="settings-button" type="button" aria-label="Open settings" title="Settings" onClick={() => setSettingsOpen(true)}><GearIcon /></button>
         </div>
       </header>
