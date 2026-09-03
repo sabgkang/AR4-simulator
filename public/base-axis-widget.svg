@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 110" role="img" aria-labelledby="title description">
+  <title id="title">World coordinate axes</title>
+  <desc id="description">Isometric X, Y, and Z coordinate arrows. X is red, Y is green, and Z is blue.</desc>
+  <defs>
+    <marker id="arrow-x" markerWidth="11" markerHeight="11" refX="2" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0L9 5L0 10Z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrow-y" markerWidth="11" markerHeight="11" refX="2" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0L9 5L0 10Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-z" markerWidth="11" markerHeight="11" refX="2" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0L9 5L0 10Z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <path d="M60 64L92 83L60 102L28 83Z" fill="#ffffff" fill-opacity=".18" stroke="#94a3b8" stroke-width="1.25"/>
+  <path d="M60 64L28 83L28 39L60 20Z" fill="#ffffff" fill-opacity=".18" stroke="#94a3b8" stroke-width="1.25"/>
+  <path d="M60 64L92 83L92 39L60 20Z" fill="#ffffff" fill-opacity=".18" stroke="#94a3b8" stroke-width="1.25"/>
+  <g font-family="Arial, sans-serif" font-size="11" font-weight="700" text-anchor="middle">
+    <text x="60" y="88" fill="#475569">XY</text>
+    <text x="40" y="51" fill="#475569">XZ</text>
+    <text x="80" y="51" fill="#475569">YZ</text>
+  </g>
+  <path d="M60 64L20 87" fill="none" stroke="#dc2626" stroke-width="3.5" stroke-linecap="butt" marker-end="url(#arrow-x)"/>
+  <path d="M60 64L100 87" fill="none" stroke="#16a34a" stroke-width="3.5" stroke-linecap="butt" marker-end="url(#arrow-y)"/>
+  <path d="M60 64L60 13" fill="none" stroke="#2563eb" stroke-width="3.5" stroke-linecap="butt" marker-end="url(#arrow-z)"/>
+  <g font-family="Arial, sans-serif" font-size="16" font-weight="700">
+    <text x="2" y="102" fill="#dc2626">X</text>
+    <text x="108" y="102" fill="#16a34a">Y</text>
+    <text x="67" y="13" fill="#2563eb">Z</text>
+  </g>
+</svg>

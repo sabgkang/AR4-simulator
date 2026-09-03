@@ -21,9 +21,9 @@ const JOINTS = [
 const JOINT_ZERO_OFFSETS: Pose = [Math.PI / 2, 0, 0, 0, 0, 0];
 
 const PRESETS: Record<string, Pose> = {
-  Home: [0, -42, 52, 0, 48, 0],
-  Upright: [0, 0, 0, 0, 0, 0],
-  Inspect: [-38, -28, 50, 42, 64, -24],
+  Home: [0, 0, 0, 0, 0, 0],
+  Upright: [0, 0, -89, 0, 0, 0],
+  Inspect: [0, 45, 20, 0, 0, 0],
 };
 
 const MESH_ROOT = '/meshes/ar4_mk5/';
@@ -32,6 +32,8 @@ const TOOL_TIP_MARKER_RADIUS = 0.01;
 const TCP_AXIS_LENGTH = 0.05;
 const TCP_AXIS_THICKNESS = 0.005;
 const TCP_FRAME_ROTATION_Z = -Math.PI / 2;
+const BASE_AXIS_LENGTH = 0.1;
+const BASE_AXIS_THICKNESS = 0.005;
 const LINK_MESHES = [
   ['Link_1_Aluminum.STL', 'Link_1_Motor.STL'],
   ['Link_2_Aluminum.STL', 'Link_2_Motor.STL', 'Link_2_Cover.STL', 'Link_2_Logo.STL'],
@@ -121,18 +123,19 @@ function JointAngleInput({
   max: number;
   onChange: (value: number) => void;
 }) {
-  const [draft, setDraft] = useState(String(Math.round(value * 10) / 10));
+  const formatAngle = (angle: number) => String(Math.round(angle * 100) / 100);
+  const [draft, setDraft] = useState(formatAngle(value));
   const focused = useRef(false);
 
   useEffect(() => {
-    if (!focused.current) setDraft(String(Math.round(value * 10) / 10));
+    if (!focused.current) setDraft(formatAngle(value));
   }, [value]);
 
   const commit = () => {
     const parsed = Number(draft);
     const next = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value;
     onChange(next);
-    setDraft(String(Math.round(next * 10) / 10));
+    setDraft(formatAngle(next));
   };
 
   return (
@@ -143,7 +146,7 @@ function JointAngleInput({
         type="number"
         min={min}
         max={max}
-        step="0.1"
+        step="0.01"
         value={draft}
         onFocus={() => { focused.current = true; }}
         onChange={(event) => {
@@ -156,7 +159,7 @@ function JointAngleInput({
         onKeyDown={(event) => {
           if (event.key === 'Enter') event.currentTarget.blur();
           if (event.key === 'Escape') {
-            setDraft(String(Math.round(value * 10) / 10));
+            setDraft(formatAngle(value));
             event.currentTarget.blur();
           }
         }}
@@ -263,6 +266,32 @@ export default function RobotSimulator() {
 
     const loader = new STLLoader();
     const disposables: Array<THREE.BufferGeometry | THREE.Material> = [];
+    const baseFrame = new THREE.Group();
+    baseFrame.name = 'Base reference frame';
+    [
+      { direction: new THREE.Vector3(1, 0, 0), color: 0xef233c },
+      { direction: new THREE.Vector3(0, 1, 0), color: 0x16a34a },
+      { direction: new THREE.Vector3(0, 0, 1), color: 0x2563eb },
+    ].forEach(({ direction, color }) => {
+      const headLength = 0.022;
+      const shaftLength = BASE_AXIS_LENGTH - headLength;
+      const material = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
+      const shaftGeometry = new THREE.CylinderGeometry(BASE_AXIS_THICKNESS / 2, BASE_AXIS_THICKNESS / 2, shaftLength, 16);
+      const headGeometry = new THREE.CylinderGeometry(0, BASE_AXIS_THICKNESS * 1.5, headLength, 20);
+      const shaft = new THREE.Mesh(shaftGeometry, material);
+      const head = new THREE.Mesh(headGeometry, material);
+      shaft.position.y = shaftLength / 2;
+      head.position.y = shaftLength + headLength / 2;
+      shaft.renderOrder = 20;
+      head.renderOrder = 20;
+      const arrow = new THREE.Group();
+      arrow.add(shaft, head);
+      arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+      baseFrame.add(arrow);
+      disposables.push(shaftGeometry, headGeometry, material);
+    });
+    scene.add(baseFrame);
+
     const loadMesh = (parent: THREE.Object3D, name: string, transform = { xyz: [0, 0, 0] as const, rpy: [0, 0, 0] as const }) => {
       loader.load(MESH_ROOT + name, (geometry) => {
         geometry.computeVertexNormals();
@@ -522,7 +551,27 @@ export default function RobotSimulator() {
   const resetView = () => {
     const camera = cameraRef.current, controls = controlsRef.current;
     if (!camera || !controls) return;
+    camera.up.set(0, 0, 1);
     camera.position.set(1.05, -1.15, 0.78); controls.target.set(0, 0, 0.31); controls.update();
+  };
+
+  const setPlaneView = (plane: 'XY' | 'XZ' | 'YZ') => {
+    const camera = cameraRef.current, controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const distance = Math.max(1.2, camera.position.distanceTo(controls.target));
+    controls.target.set(0, 0, 0);
+    if (plane === 'XY') {
+      camera.up.set(0, 1, 0);
+      camera.position.set(0, 0, distance);
+    } else if (plane === 'XZ') {
+      camera.up.set(0, 0, 1);
+      camera.position.set(0, distance, 0);
+    } else {
+      camera.up.set(0, 0, 1);
+      camera.position.set(distance, 0, 0);
+    }
+    camera.lookAt(controls.target);
+    controls.update();
   };
 
   return (
@@ -546,7 +595,13 @@ export default function RobotSimulator() {
           </div>
           <div className="canvas-wrap">
             <canvas ref={canvasRef} aria-label="Interactive 3D model of the AR4 MK5 robot" />
-            <div className="orbit-hint">Drag to orbit · Scroll to zoom</div><div className="axis-widget"><b>Z</b><span>Y</span><i>X</i></div>
+            <div className="orbit-hint">Drag to orbit · Scroll to zoom</div>
+            <div className="axis-widget" aria-label="Standard plane views">
+              <img className="axis-widget-image" src="/base-axis-widget.svg" alt="World axes with clickable XY, XZ, and YZ planes" />
+              <button className="axis-plane axis-plane-xy" type="button" title="View XY plane from +Z" aria-label="View XY plane from positive Z" onClick={() => setPlaneView('XY')} />
+              <button className="axis-plane axis-plane-xz" type="button" title="View XZ plane from +Y" aria-label="View XZ plane from positive Y" onClick={() => setPlaneView('XZ')} />
+              <button className="axis-plane axis-plane-yz" type="button" title="View YZ plane from +X" aria-label="View YZ plane from positive X" onClick={() => setPlaneView('YZ')} />
+            </div>
           </div>
           <div className="telemetry-strip">
             <div><span>X</span><strong>{tcp.x.toFixed(1)}</strong><small>mm</small></div><div><span>Y</span><strong>{tcp.y.toFixed(1)}</strong><small>mm</small></div><div><span>Z</span><strong>{tcp.z.toFixed(1)}</strong><small>mm</small></div><div className="status-cell"><i /><strong>{running ? 'Moving' : 'Holding'}</strong></div>
@@ -554,7 +609,7 @@ export default function RobotSimulator() {
         </section>
 
         <aside className="control-panel">
-          <div className="panel-heading"><div><span className="eyebrow">MANUAL CONTROL</span><h2>Joint positions</h2></div><button className="zero-button" onClick={() => moveTo(PRESETS.Upright)}>Zero all</button></div>
+          <div className="panel-heading"><div><span className="eyebrow">MANUAL CONTROL</span><h2>Joint positions</h2></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
           <div className="joint-list">
             {JOINTS.map((joint, index) => {
               const progress = ((angles[index] - joint.min) / (joint.max - joint.min)) * 100;
