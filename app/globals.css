@@ -204,6 +204,14 @@ h2 { font-size:19px; }
 .default-button:hover { border-color:#9eb1eb; color:#1746d1; }
 .setting-field { display:block; }
 .setting-field>span { display:block; margin-bottom:8px; color:#344054; font-size:14px; font-weight:700; }
+.serial-port-list { display:grid; gap:18px; }
+.serial-select-wrap { position:relative; }
+.serial-add-button,.serial-delete-button { position:absolute; top:-9px; z-index:2; width:22px; height:22px; display:grid; place-items:center; padding:0; border-radius:50%; background:#fff; box-shadow:0 2px 5px rgba(17,24,39,.12); }
+.serial-add-button { right:-9px; border:1px solid #aebff2; color:var(--blue); }
+.serial-add-button:hover { background:#eef3ff; }
+.serial-delete-button { right:18px; border:1px solid #efb5b5; color:#d92d20; }
+.serial-delete-button:hover { background:#fff1f0; }
+.serial-delete-button .delete-icon { width:12px; height:12px; }
 .serial-select { width:100%; min-height:48px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; border:1px solid #cfd6e2; border-radius:9px; background:#fff; color:#344054; text-align:left; }
 .serial-select:hover { border-color:#8fa8ee; box-shadow:0 0 0 3px rgba(36,87,230,.08); }
 .serial-select i { color:#667085; font-size:20px; font-style:normal; }

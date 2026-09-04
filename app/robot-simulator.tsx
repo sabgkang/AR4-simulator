@@ -284,6 +284,7 @@ export default function RobotSimulator() {
   const [accelerationPercent, setAccelerationPercent] = useState(10);
   const [decelerationPercent, setDecelerationPercent] = useState(10);
   const [serialPortName, setSerialPortName] = useState('No COM port selected');
+  const [auxiliarySerialPortNames, setAuxiliarySerialPortNames] = useState<string[]>([]);
   const [serialMessage, setSerialMessage] = useState<string | null>(null);
   const [visiblePanels, setVisiblePanels] = useState<Record<PanelKey, boolean>>({ plan: true, angles: true, cartesian: true });
   const [planTargets, setPlanTargets] = useState<PlanTarget[]>([]);
@@ -1097,7 +1098,15 @@ export default function RobotSimulator() {
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [settingsOpen]);
 
-  const requestSerialPort = async () => {
+  const addAuxiliarySerialPort = () => {
+    setAuxiliarySerialPortNames((current) => [...current, 'No COM port selected']);
+  };
+
+  const deleteAuxiliarySerialPort = (auxiliaryIndex: number) => {
+    setAuxiliarySerialPortNames((current) => current.filter((_, index) => index !== auxiliaryIndex));
+  };
+
+  const requestSerialPort = async (auxiliaryIndex?: number) => {
     const serial = (navigator as Navigator & { serial?: { requestPort: () => Promise<SerialPortLike> } }).serial;
     if (!serial) {
       setSerialMessage('Web Serial is unavailable. Open AR4 Studio in desktop Chrome or Edge over HTTPS or localhost.');
@@ -1108,7 +1117,12 @@ export default function RobotSimulator() {
       const info = port.getInfo();
       const vendor = info.usbVendorId?.toString(16).toUpperCase().padStart(4, '0');
       const product = info.usbProductId?.toString(16).toUpperCase().padStart(4, '0');
-      setSerialPortName(vendor && product ? `Selected port · USB ${vendor}:${product}` : 'Selected serial port');
+      const selectedPortName = vendor && product ? `Selected port · USB ${vendor}:${product}` : 'Selected serial port';
+      if (auxiliaryIndex === undefined) {
+        setSerialPortName(selectedPortName);
+      } else {
+        setAuxiliarySerialPortNames((current) => current.map((name, index) => index === auxiliaryIndex ? selectedPortName : name));
+      }
       setSerialMessage('Port permission granted.');
     } catch (error) {
       if (error instanceof DOMException && error.name === 'NotFoundError') {
@@ -1610,11 +1624,24 @@ export default function RobotSimulator() {
             </nav>
             <div className="settings-content">
               {settingsCategory === 'com' && <div className="settings-page">
-                <div className="settings-page-title"><div><h3>COM port</h3><p>Select the AR4 Teensy controller.</p></div></div>
-                <label className="setting-field serial-field">
-                  <span>COM port</span>
-                  <button type="button" className="serial-select" onClick={requestSerialPort}><strong>{serialPortName}</strong><i aria-hidden="true">⌄</i></button>
-                </label>
+                <div className="settings-page-title"><div><h3>COM Ports</h3><p>Select serial ports.</p></div></div>
+                <div className="serial-port-list">
+                  <div className="setting-field serial-field">
+                    <span>Robot COM port</span>
+                    <div className="serial-select-wrap">
+                      <button className="serial-add-button" type="button" title="Add Auxiliary COM port" aria-label="Add Auxiliary COM port" onClick={addAuxiliarySerialPort}><PlusIcon /></button>
+                      <button type="button" className="serial-select" onClick={() => { void requestSerialPort(); }}><strong>{serialPortName}</strong><i aria-hidden="true">⌄</i></button>
+                    </div>
+                  </div>
+                  {auxiliarySerialPortNames.map((portName, index) => <div className="setting-field serial-field" key={index}>
+                    <span>Auxiliary COM port {index + 1}</span>
+                    <div className="serial-select-wrap">
+                      <button className="serial-delete-button" type="button" title={`Delete Auxiliary COM port ${index + 1}`} aria-label={`Delete Auxiliary COM port ${index + 1}`} onClick={() => deleteAuxiliarySerialPort(index)}><DeleteIcon /></button>
+                      <button className="serial-add-button" type="button" title={`Add Auxiliary COM port ${auxiliarySerialPortNames.length + 1}`} aria-label={`Add Auxiliary COM port ${auxiliarySerialPortNames.length + 1}`} onClick={addAuxiliarySerialPort}><PlusIcon /></button>
+                      <button type="button" className="serial-select" onClick={() => { void requestSerialPort(index); }}><strong>{portName}</strong><i aria-hidden="true">⌄</i></button>
+                    </div>
+                  </div>)}
+                </div>
                 {serialMessage && <p className="settings-note" role="status">{serialMessage}</p>}
               </div>}
 
