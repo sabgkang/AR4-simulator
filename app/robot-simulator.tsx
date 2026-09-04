@@ -19,6 +19,7 @@ type MoveJCommand = { cmd: 'move_j'; pose: number[]; spd_type?: string; spd?: nu
 type MoveLCommand = { cmd: 'move_l'; pose: number[]; ext?: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; rounding?: number; w?: string };
 type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
 type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
+type PanelKey = 'plan' | 'angles' | 'cartesian';
 type RobotPositionResponse = ReturnType<typeof createPositionResponse>;
 type CommandResponse = typeof HELLO_RESPONSE | RobotPositionResponse | { msg: 'error'; data: string };
 
@@ -199,6 +200,10 @@ function GearIcon() {
   return <span className="gear-icon" aria-hidden="true">⚙</span>;
 }
 
+function ViewIcon() {
+  return <svg className="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.75" /></svg>;
+}
+
 export default function RobotSimulator() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const jointRotors = useRef<THREE.Group[]>([]);
@@ -228,6 +233,12 @@ export default function RobotSimulator() {
   const [decelerationPercent, setDecelerationPercent] = useState(10);
   const [serialPortName, setSerialPortName] = useState('No COM port selected');
   const [serialMessage, setSerialMessage] = useState<string | null>(null);
+  const [visiblePanels, setVisiblePanels] = useState<Record<PanelKey, boolean>>({ plan: true, angles: true, cartesian: true });
+
+  const setPanelVisible = (panel: PanelKey, visible: boolean) => {
+    setVisiblePanels((current) => ({ ...current, [panel]: visible }));
+  };
+  const visiblePanelCount = Object.values(visiblePanels).filter(Boolean).length;
 
   const updateTcp = useCallback(() => {
     const end = jointRotors.current[5];
@@ -1034,20 +1045,27 @@ export default function RobotSimulator() {
         </div>
       </header>
 
-      <section className="workspace">
+      <section
+        className={`workspace${visiblePanelCount === 0 ? ' workspace-solo' : ''}`}
+        style={{ '--visible-panels': visiblePanelCount } as React.CSSProperties}
+      >
         <section className="viewport-card">
-          <div className="viewport-head">
-            <div><span className="eyebrow">LIVE MODEL</span><h1>AR4 MK5</h1></div>
-            <div className="viewport-tools"><span>{loaded < 18 ? `Loading ${Math.round((loaded / 18) * 100)}%` : 'Model ready'}</span><button onClick={resetView}>Fit</button></div>
-          </div>
           <div className="canvas-wrap">
             <canvas ref={canvasRef} aria-label="Interactive 3D model of the AR4 MK5 robot" />
+            {visiblePanelCount < 3 && <div className="panel-reopeners" aria-label="Show hidden panels">
+              {!visiblePanels.plan && <button type="button" onClick={() => setPanelVisible('plan', true)}><ViewIcon />PLAN</button>}
+              {!visiblePanels.angles && <button type="button" onClick={() => setPanelVisible('angles', true)}><ViewIcon />ANGLES</button>}
+              {!visiblePanels.cartesian && <button type="button" onClick={() => setPanelVisible('cartesian', true)}><ViewIcon />CARTESIAN</button>}
+            </div>}
             <div className="orbit-hint">Drag to orbit · Scroll to zoom</div>
             <div className="axis-widget" aria-label="Standard plane views">
-              <img className="axis-widget-image" src="/base-axis-widget.svg" alt="World axes with clickable XY, XZ, and YZ planes" />
-              <button className="axis-plane axis-plane-xy" type="button" title="View XY plane from +Z" aria-label="View XY plane from positive Z" onClick={() => setPlaneView('XY')} />
-              <button className="axis-plane axis-plane-xz" type="button" title="View XZ plane from +Y" aria-label="View XZ plane from positive Y" onClick={() => setPlaneView('XZ')} />
-              <button className="axis-plane axis-plane-yz" type="button" title="View YZ plane from +X" aria-label="View YZ plane from positive X" onClick={() => setPlaneView('YZ')} />
+              <button className="axis-fit" type="button" onClick={resetView}>Fit</button>
+              <div className="axis-graphic">
+                <img className="axis-widget-image" src="/base-axis-widget.svg" alt="World axes with clickable XY, XZ, and YZ planes" />
+                <button className="axis-plane axis-plane-xy" type="button" title="View XY plane from +Z" aria-label="View XY plane from positive Z" onClick={() => setPlaneView('XY')} />
+                <button className="axis-plane axis-plane-xz" type="button" title="View XZ plane from +Y" aria-label="View XZ plane from positive Y" onClick={() => setPlaneView('XZ')} />
+                <button className="axis-plane axis-plane-yz" type="button" title="View YZ plane from +X" aria-label="View YZ plane from positive X" onClick={() => setPlaneView('YZ')} />
+              </div>
             </div>
           </div>
           <div className="telemetry-strip">
@@ -1061,8 +1079,14 @@ export default function RobotSimulator() {
           </div>
         </section>
 
-        <aside className="control-panel">
-          <div className="panel-heading"><div><span className="eyebrow">MANUAL CONTROL</span><h2>Joint positions</h2></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
+        {visiblePanels.plan && <aside className="plan-panel">
+          <div className="panel-heading">
+            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide PLAN" aria-label="Hide PLAN column" onClick={() => setPanelVisible('plan', false)}><ViewIcon /></button><span className="eyebrow">PLAN</span></div>
+          </div>
+        </aside>}
+
+        {visiblePanels.angles && <aside className="control-panel">
+          <div className="panel-heading"><div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide ANGLES" aria-label="Hide ANGLES column" onClick={() => setPanelVisible('angles', false)}><ViewIcon /></button><span className="eyebrow">ANGLES</span></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
           <div className="joint-list">
             {JOINTS.map((joint, index) => {
               const range = jointRanges[index];
@@ -1076,11 +1100,11 @@ export default function RobotSimulator() {
           <div className="preset-section"><div className="section-label"><span>Saved poses</span><small>Click to move</small></div><div className="preset-grid">
             {Object.entries(PRESETS).map(([name, pose]) => <button key={name} onClick={() => moveTo(pose)}><span className={`pose-icon pose-${name.toLowerCase()}`} /><strong>{name}</strong><small>{pose.slice(0, 3).join(' · ')}°</small></button>)}
           </div></div>
-        </aside>
+        </aside>}
 
-        <aside className="ik-panel">
+        {visiblePanels.cartesian && <aside className="ik-panel">
           <div className="panel-heading">
-            <div><span className="eyebrow">CARTESIAN TARGET</span><h2>Inverse kinematics</h2></div>
+            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide CARTESIAN" aria-label="Hide CARTESIAN column" onClick={() => setPanelVisible('cartesian', false)}><ViewIcon /></button><span className="eyebrow">CARTESIAN</span></div>
             <button type="button" className="current-pose-button" onClick={fillCurrentPose}>Use current</button>
           </div>
           <form className="ik-section" onSubmit={(event) => { event.preventDefault(); solveInverseKinematics(); }}>
@@ -1105,7 +1129,7 @@ export default function RobotSimulator() {
             <button className="solve-button" type="submit" disabled={loaded < 18 || running}>Calculate &amp; move</button>
             {ikMessage && <p className={`ik-message ${ikMessage.type}`} role="status" aria-live="polite">{ikMessage.text}</p>}
           </form>
-        </aside>
+        </aside>}
       </section>
 
       {settingsOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
