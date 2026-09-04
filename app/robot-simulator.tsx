@@ -21,7 +21,7 @@ type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
 type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
 type PanelKey = 'plan' | 'angles' | 'cartesian';
 type PlanTarget = { id: number; name: string; pose: TcpPose; visible: boolean };
-type PlanCommand = { id: number; type: 'move_j' | 'move_l'; startTargetId: number; endTargetId: number; speed: number; acceleration: number; deceleration: number };
+type PlanCommand = { id: number; type: 'move_j' | 'move_l'; startTargetId: number | null; endTargetId: number; speed: number; acceleration: number; deceleration: number };
 type RobotPositionResponse = ReturnType<typeof createPositionResponse>;
 type CommandResponse = typeof HELLO_RESPONSE | RobotPositionResponse | { msg: 'error'; data: string };
 
@@ -77,8 +77,7 @@ const LINK_MESH_TRANSFORMS = [
   { xyz: [0, 0, -0.016], rpy: [0, 0, 0] },
 ] as const;
 
-function chainPlanCommands(commands: PlanCommand[], firstTargetId?: number) {
-  if (firstTargetId === undefined) return commands;
+function chainPlanCommands(commands: PlanCommand[], firstTargetId: number | null) {
   let startTargetId = firstTargetId;
   return commands.map((command) => {
     const chained = { ...command, startTargetId };
@@ -240,6 +239,18 @@ function RunIcon() {
   return <svg className="run-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z" /></svg>;
 }
 
+function PreviewIcon() {
+  return <svg className="plan-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.75" /></svg>;
+}
+
+function ExportIcon() {
+  return <svg className="plan-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 13v6H5V6h6" /></svg>;
+}
+
+function PlusIcon() {
+  return <svg className="plus-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
+}
+
 export default function RobotSimulator() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const jointRotors = useRef<THREE.Group[]>([]);
@@ -277,22 +288,28 @@ export default function RobotSimulator() {
   const [visiblePanels, setVisiblePanels] = useState<Record<PanelKey, boolean>>({ plan: true, angles: true, cartesian: true });
   const [planTargets, setPlanTargets] = useState<PlanTarget[]>([]);
   const [planCommands, setPlanCommands] = useState<PlanCommand[]>([]);
-  const [addCommandMenuOpen, setAddCommandMenuOpen] = useState(false);
+  const [commandInsertAfterId, setCommandInsertAfterId] = useState<number | null>(null);
   const [pendingCommandType, setPendingCommandType] = useState<PlanCommand['type'] | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [targetDraft, setTargetDraft] = useState<PlanTarget | null>(null);
   const [commandDraft, setCommandDraft] = useState<PlanCommand | null>(null);
   const [planFileMessage, setPlanFileMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [planFilename, setPlanFilename] = useState<string | null>(null);
+  const [planExecution, setPlanExecution] = useState<'preview' | 'run' | null>(null);
+  const [planExecutionMessage, setPlanExecutionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const setPanelVisible = (panel: PanelKey, visible: boolean) => {
     setVisiblePanels((current) => ({ ...current, [panel]: visible }));
   };
   const visiblePanelCount = Object.values(visiblePanels).filter(Boolean).length;
-  const nextCommandStartTargetId = planCommands.at(-1)?.endTargetId ?? planTargets[0]?.id;
-
-  const addTarget = () => {
+  const addTargetAfter = (afterId: number) => {
     const id = nextTargetIdRef.current++;
-    setPlanTargets((current) => [...current, { id, name: `Target${id}`, pose: { ...tcpRef.current }, visible: true }]);
+    const target = { id, name: `Target${id}`, pose: { ...tcpRef.current }, visible: true };
+    setPlanTargets((current) => {
+      const index = current.findIndex((candidate) => candidate.id === afterId);
+      if (index < 0) return [...current, target];
+      return [...current.slice(0, index + 1), target, ...current.slice(index + 1)];
+    });
   };
 
   const toggleTargetVisibility = (id: number) => {
@@ -304,30 +321,41 @@ export default function RobotSimulator() {
     setPlanTargets(remainingTargets);
     setPlanCommands((current) => chainPlanCommands(
       current.filter((command) => command.startTargetId !== id && command.endTargetId !== id),
-      remainingTargets[0]?.id,
+      current[0]?.startTargetId ?? null,
+    ));
+  };
+
+  const deletePlanCommand = (id: number) => {
+    setPlanCommands((current) => chainPlanCommands(
+      current.filter((command) => command.id !== id),
+      current[0]?.startTargetId ?? null,
     ));
   };
 
   const addPlanCommand = (type: PlanCommand['type']) => {
-    if (planTargets.length < 2) return;
+    if (commandInsertAfterId === null || planTargets.length < 1) return;
     setPendingCommandType(type);
   };
 
   const addPlanCommandToTarget = (endTargetId: number) => {
-    if (!pendingCommandType) return;
-    const startTargetId = planCommands.at(-1)?.endTargetId ?? planTargets[0]?.id;
-    if (startTargetId === undefined) return;
-    setPlanCommands((current) => [...current, {
-      id: nextCommandIdRef.current++,
-      type: pendingCommandType,
-      startTargetId,
-      endTargetId,
-      speed: speedPercent,
-      acceleration: accelerationPercent,
-      deceleration: decelerationPercent,
-    }]);
+    if (!pendingCommandType || commandInsertAfterId === null) return;
+    setPlanCommands((current) => {
+      const index = current.findIndex((command) => command.id === commandInsertAfterId);
+      if (index < 0) return current;
+      const inserted: PlanCommand = {
+        id: nextCommandIdRef.current++,
+        type: pendingCommandType,
+        startTargetId: current[index].endTargetId,
+        endTargetId,
+        speed: speedPercent,
+        acceleration: accelerationPercent,
+        deceleration: decelerationPercent,
+      };
+      const next = [...current.slice(0, index + 1), inserted, ...current.slice(index + 1)];
+      return chainPlanCommands(next, next[0]?.startTargetId ?? null);
+    });
     setPendingCommandType(null);
-    setAddCommandMenuOpen(false);
+    setCommandInsertAfterId(null);
   };
 
   const savePlan = () => {
@@ -361,12 +389,12 @@ export default function RobotSimulator() {
         if (!command || typeof command !== 'object') return false;
         const candidate = command as Partial<PlanCommand>;
         return Number.isInteger(candidate.id) && (candidate.type === 'move_j' || candidate.type === 'move_l')
-          && targetIds.has(candidate.startTargetId ?? -1) && targetIds.has(candidate.endTargetId ?? -1)
+          && (candidate.startTargetId === null || targetIds.has(candidate.startTargetId ?? -1)) && targetIds.has(candidate.endTargetId ?? -1)
           && [candidate.speed, candidate.acceleration, candidate.deceleration].every((value) => typeof value === 'number' && Number.isFinite(value));
       });
       if (targets.length !== parsed.targets.length || commands.length !== parsed.commands.length) throw new Error('The plan contains invalid targets or commands.');
       setPlanTargets(targets);
-      setPlanCommands(chainPlanCommands(commands, targets[0]?.id));
+      setPlanCommands(chainPlanCommands(commands, commands[0]?.startTargetId ?? null));
       setPlanFilename(file.name);
       homeTargetInitializedRef.current = true;
       nextTargetIdRef.current = Math.max(0, ...targets.map((target) => target.id)) + 1;
@@ -445,12 +473,18 @@ export default function RobotSimulator() {
     if (loaded < 18 || homeTargetInitializedRef.current) return;
     homeTargetInitializedRef.current = true;
     const [x, y, z, rx, ry, rz] = getPoseForJoints(PRESETS.Home);
+    const homeTarget: PlanTarget = { id: 1, name: 'HOME', pose: { x, y, z, rx, ry, rz }, visible: true };
     setPlanTargets((current) => {
       if (current.length > 0) return current;
       nextTargetIdRef.current = 2;
-      return [{ id: 1, name: 'HOME', pose: { x, y, z, rx, ry, rz }, visible: true }];
+      return [homeTarget];
     });
-  }, [loaded, getPoseForJoints]);
+    setPlanCommands((current) => {
+      if (current.length > 0) return current;
+      nextCommandIdRef.current = 2;
+      return [{ id: 1, type: 'move_j', startTargetId: null, endTargetId: homeTarget.id, speed: speedPercent, acceleration: accelerationPercent, deceleration: decelerationPercent }];
+    });
+  }, [loaded, getPoseForJoints, speedPercent, accelerationPercent, decelerationPercent]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -735,22 +769,34 @@ export default function RobotSimulator() {
     setAngles((current) => current.map((angle, i) => i === index ? safeValue : angle) as Pose);
   };
 
-  const moveTo = (target: Pose) => {
-    if (runningRef.current) return;
+  const moveToAsync = (target: Pose) => new Promise<void>((resolve, reject) => {
+    if (runningRef.current) {
+      reject(new Error('The robot is already moving.'));
+      return;
+    }
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     const safeTarget = target.map((value, index) => Math.min(jointRanges[index].max, Math.max(jointRanges[index].min, value))) as Pose;
-    const start = [...angles] as Pose, started = performance.now(), duration = 700;
+    const start = [...anglesRef.current] as Pose;
+    const started = performance.now(), duration = 700;
     runningRef.current = true;
     setRunning(true);
     const step = (now: number) => {
       const raw = Math.min((now - started) / duration, 1), eased = 1 - Math.pow(1 - raw, 3);
-      setAngles(start.map((value, i) => value + (safeTarget[i] - value) * eased) as Pose);
+      const next = start.map((value, i) => value + (safeTarget[i] - value) * eased) as Pose;
+      anglesRef.current = next;
+      setAngles(next);
       if (raw < 1) animationRef.current = requestAnimationFrame(step); else {
         runningRef.current = false;
         setRunning(false);
+        resolve();
       }
     };
     animationRef.current = requestAnimationFrame(step);
+  });
+
+  const moveTo = (target: Pose) => {
+    if (runningRef.current) return;
+    void moveToAsync(target);
   };
 
   const solvePose = useCallback((values: Pose, wristConfiguration = 'A', referenceJoints: Pose = anglesRef.current, preferContinuation = false) => {
@@ -947,6 +993,72 @@ export default function RobotSimulator() {
       moveTo(solution.joints);
     } catch (error) {
       setIkMessage({ type: 'error', text: error instanceof Error ? error.message : `Unable to move to ${target.name}.` });
+    }
+  };
+
+  const getPlanTarget = (id: number) => {
+    const target = planTargets.find((candidate) => candidate.id === id);
+    if (!target) throw new Error(`Target ${id} was not found.`);
+    return target;
+  };
+
+  const targetPoseArray = (target: PlanTarget) => {
+    const { x, y, z, rx, ry, rz } = target.pose;
+    return [x, y, z, rx, ry, rz] as Pose;
+  };
+
+  const previewPlan = async () => {
+    if (planExecution || runningRef.current || planCommands.length === 0) return;
+    setPlanExecution('preview');
+    setPlanExecutionMessage(null);
+    try {
+      const startTargetId = planCommands[0].startTargetId;
+      if (startTargetId !== null) {
+        const startTarget = getPlanTarget(startTargetId);
+        await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
+      }
+      for (const command of planCommands) {
+        const endTarget = getPlanTarget(command.endTargetId);
+        await moveToAsync(solvePose(targetPoseArray(endTarget)).joints);
+      }
+      setPlanExecutionMessage({ type: 'success', text: 'Preview completed.' });
+    } catch (error) {
+      setPlanExecutionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Preview failed.' });
+    } finally {
+      setPlanExecution(null);
+    }
+  };
+
+  const runPlan = async () => {
+    if (planExecution || runningRef.current || planCommands.length === 0) return;
+    setPlanExecution('run');
+    setPlanExecutionMessage(null);
+    try {
+      const executeCommand = window.ar4Simulator?.executeCommand;
+      if (!executeCommand) throw new Error('The simulator command API is not ready.');
+      const startTargetId = planCommands[0].startTargetId;
+      if (startTargetId !== null) {
+        const startTarget = getPlanTarget(startTargetId);
+        await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
+      }
+      for (const command of planCommands) {
+        const endTarget = getPlanTarget(command.endTargetId);
+        const response = await executeCommand({
+          cmd: command.type,
+          pose: targetPoseArray(endTarget),
+          spd_type: 'percent',
+          spd: command.speed,
+          acc: command.acceleration,
+          dec: command.deceleration,
+          ramp: 50,
+        });
+        if ('msg' in response && response.msg === 'error') throw new Error(response.data);
+      }
+      setPlanExecutionMessage({ type: 'success', text: 'Plan completed.' });
+    } catch (error) {
+      setPlanExecutionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Plan failed.' });
+    } finally {
+      setPlanExecution(null);
     }
   };
 
@@ -1337,22 +1449,6 @@ export default function RobotSimulator() {
           </div>
           <div className="plan-content">
             {planFileMessage && <div className={`plan-file-message ${planFileMessage.type}`} role="status">{planFileMessage.text}</div>}
-            <div className="plan-toolbar">
-              <button type="button" disabled={loaded < 18} onClick={addTarget}>Add Target</button>
-              <div className="add-command-wrap">
-                <button type="button" aria-expanded={addCommandMenuOpen} onClick={() => { setPendingCommandType(null); setAddCommandMenuOpen((open) => !open); }}>Add Cmd</button>
-                {addCommandMenuOpen && <div className="add-command-menu" role="menu">
-                  {!pendingCommandType ? <>
-                    <button type="button" role="menuitem" disabled={planTargets.length < 2} onClick={() => addPlanCommand('move_j')}>move_j</button>
-                    <button type="button" role="menuitem" disabled={planTargets.length < 2} onClick={() => addPlanCommand('move_l')}>move_l</button>
-                    {planTargets.length < 2 && <small>Add at least two targets first</small>}
-                  </> : <>
-                    <small>Select end target</small>
-                    {planTargets.filter((target) => target.id !== nextCommandStartTargetId).map((target) => <button type="button" role="menuitem" key={target.id} onClick={() => addPlanCommandToTarget(target.id)}>{target.name}</button>)}
-                  </>}
-                </div>}
-              </div>
-            </div>
 
             {planTargets.length > 0 && <section className="plan-group">
               <h3>Targets</h3>
@@ -1362,6 +1458,7 @@ export default function RobotSimulator() {
                   <button className="plan-icon-button" type="button" title={`Edit ${target.name}`} aria-label={`Edit ${target.name}`} onClick={() => setTargetDraft({ ...target, pose: { ...target.pose } })}><EditIcon /></button>
                   <div className="plan-item-copy"><button className="target-name-button" type="button" disabled={running || loaded < 18} title={`Move robot to ${target.name}`} onClick={() => moveToPlanTarget(target)}><strong>{target.name}</strong></button><small>{target.pose.x.toFixed(1)}, {target.pose.y.toFixed(1)}, {target.pose.z.toFixed(1)} mm</small></div>
                   <button className="plan-icon-button delete" type="button" title={`Delete ${target.name}`} aria-label={`Delete ${target.name}`} onClick={() => deleteTarget(target.id)}><DeleteIcon /></button>
+                  <button className="row-add-button" type="button" disabled={running || loaded < 18} title={`Add target after ${target.name}`} aria-label={`Add target after ${target.name}`} onClick={() => addTargetAfter(target.id)}><PlusIcon /></button>
                 </div>)}
               </div>
             </section>}
@@ -1370,18 +1467,39 @@ export default function RobotSimulator() {
               <div className="plan-group-heading">
                 <h3>Plan</h3>
                 <div className="plan-run-area">
-                  <button className="plan-run-button" type="button" title="Run plan"><RunIcon />Run</button>
+                  <button className="plan-action-button preview" type="button" title="Preview plan" disabled={planExecution !== null || running || planCommands.length === 0} onClick={() => { void previewPlan(); }}><PreviewIcon />{planExecution === 'preview' ? 'Previewing…' : 'Preview'}</button>
+                  <button className="plan-run-button" type="button" title="Run plan" disabled={planExecution !== null || running || planCommands.length === 0} onClick={() => { void runPlan(); }}><RunIcon />{planExecution === 'run' ? 'Running…' : 'Run'}</button>
+                  <div className="plan-export-wrap">
+                    <button className="plan-action-button export" type="button" title="Export plan" aria-expanded={exportMenuOpen} onClick={() => setExportMenuOpen((open) => !open)}><ExportIcon />Export</button>
+                    {exportMenuOpen && <div className="plan-export-menu" role="menu">
+                      <button type="button" role="menuitem" onClick={() => setExportMenuOpen(false)}>Python</button>
+                      <button type="button" role="menuitem" onClick={() => setExportMenuOpen(false)}>JavaScript</button>
+                    </div>}
+                  </div>
                 </div>
               </div>
               <div className="plan-filename" title={planFilename ?? undefined}>{planFilename ?? ''}</div>
+              {planExecutionMessage && <div className={`plan-execution-message ${planExecutionMessage.type}`} role="status">{planExecutionMessage.text}</div>}
               <div className="plan-items">
-                {planCommands.map((command) => {
+                {planCommands.map((command, index) => {
                   const startTarget = planTargets.find((candidate) => candidate.id === command.startTargetId);
                   const endTarget = planTargets.find((candidate) => candidate.id === command.endTargetId);
                   return <div className="plan-item command-item" key={command.id}>
-                    <span className={`command-kind ${command.type}`}>{command.type}</span>
-                    <div className="plan-item-copy"><strong>{startTarget?.name ?? 'Missing'} → {endTarget?.name ?? 'Missing'}</strong><small>SPD {command.speed}% · ACC {command.acceleration}% · DEC {command.deceleration}%</small></div>
                     <button className="plan-icon-button" type="button" title={`Edit ${command.type} command`} aria-label={`Edit ${command.type} command`} onClick={() => setCommandDraft({ ...command })}><EditIcon /></button>
+                    <span className={`command-kind ${command.type}`}>{command.type}</span>
+                    <div className="plan-item-copy"><strong>{index === 0 && command.startTargetId === null ? 'HOMING' : <>{command.startTargetId === null ? 'Current position' : startTarget?.name ?? 'Missing'} → {endTarget?.name ?? 'Missing'}</>}</strong><small>SPD {command.speed}% · ACC {command.acceleration}% · DEC {command.deceleration}%</small></div>
+                    <button className="plan-icon-button delete" type="button" title={`Delete ${command.type} command`} aria-label={`Delete ${command.type} command`} onClick={() => deletePlanCommand(command.id)}><DeleteIcon /></button>
+                    <button className="row-add-button" type="button" disabled={running || planExecution !== null} title={`Add command after ${command.type}`} aria-label={`Add command after ${command.type}`} onClick={() => { setPendingCommandType(null); setCommandInsertAfterId(commandInsertAfterId === command.id ? null : command.id); }}><PlusIcon /></button>
+                    {commandInsertAfterId === command.id && <div className="row-add-menu" role="menu">
+                      {!pendingCommandType ? <>
+                        <button type="button" role="menuitem" onClick={() => addPlanCommand('move_j')}>move_j</button>
+                        <button type="button" role="menuitem" onClick={() => addPlanCommand('move_l')}>move_l</button>
+                      </> : <>
+                        <small>Select end target</small>
+                        {planTargets.filter((target) => target.id !== command.endTargetId).map((target) => <button type="button" role="menuitem" key={target.id} onClick={() => addPlanCommandToTarget(target.id)}>{target.name}</button>)}
+                        {planTargets.length < 2 && <small>Add another target first</small>}
+                      </>}
+                    </div>}
                   </div>;
                 })}
               </div>
@@ -1468,7 +1586,7 @@ export default function RobotSimulator() {
           <header className="settings-header"><h2 id="command-dialog-title">Edit Command</h2><button className="modal-close" type="button" aria-label="Close command editor" onClick={() => setCommandDraft(null)}>×</button></header>
           <div className="plan-dialog-body">
             <div className="command-dialog-grid">
-              <label><span>Start Target</span><input aria-label="Start target" value={planTargets.find((target) => target.id === commandDraft.startTargetId)?.name ?? 'Missing'} disabled /></label>
+              <label><span>Start Target</span><input aria-label="Start target" value={commandDraft.startTargetId === null ? 'Current position' : planTargets.find((target) => target.id === commandDraft.startTargetId)?.name ?? 'Missing'} disabled /></label>
               <label><span>End Target</span><select aria-label="End target" value={commandDraft.endTargetId} onChange={(event) => setCommandDraft({ ...commandDraft, endTargetId: Number(event.target.value) })}>{planTargets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
               <label><span>Command</span><select aria-label="Command type" value={commandDraft.type} onChange={(event) => setCommandDraft({ ...commandDraft, type: event.target.value as PlanCommand['type'] })}><option value="move_j">move_j</option><option value="move_l">move_l</option></select></label>
               {([['speed', 'Speed'], ['acceleration', 'Acceleration'], ['deceleration', 'Deceleration']] as const).map(([key, label]) => <label key={key}><span>{label}<small>%</small></span><input aria-label={label} type="number" min="1" max="100" step="1" value={commandDraft[key]} onChange={(event) => setCommandDraft({ ...commandDraft, [key]: Math.min(100, Math.max(1, Number(event.target.value))) })} /></label>)}
