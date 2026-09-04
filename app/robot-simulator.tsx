@@ -1436,7 +1436,7 @@ export default function RobotSimulator() {
 
         {visiblePanels.plan && <aside className="plan-panel">
           <div className="panel-heading">
-            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide PLAN" aria-label="Hide PLAN column" onClick={() => setPanelVisible('plan', false)}><ViewIcon /></button><span className="eyebrow">PLAN</span></div>
+            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide PLAN" aria-label="Hide PLAN column" onClick={() => setPanelVisible('plan', false)}><HiddenIcon /></button><span className="eyebrow">PLAN</span></div>
             <div className="plan-file-actions">
               <input ref={planFileInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -1508,7 +1508,7 @@ export default function RobotSimulator() {
         </aside>}
 
         {visiblePanels.angles && <aside className="control-panel">
-          <div className="panel-heading"><div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide ANGLES" aria-label="Hide ANGLES column" onClick={() => setPanelVisible('angles', false)}><ViewIcon /></button><span className="eyebrow">ANGLES</span></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
+          <div className="panel-heading"><div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide ANGLES" aria-label="Hide ANGLES column" onClick={() => setPanelVisible('angles', false)}><HiddenIcon /></button><span className="eyebrow">ANGLES</span></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
           <div className="joint-list">
             {JOINTS.map((joint, index) => {
               const range = jointRanges[index];
@@ -1526,7 +1526,7 @@ export default function RobotSimulator() {
 
         {visiblePanels.cartesian && <aside className="ik-panel">
           <div className="panel-heading">
-            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide CARTESIAN" aria-label="Hide CARTESIAN column" onClick={() => setPanelVisible('cartesian', false)}><ViewIcon /></button><span className="eyebrow">CARTESIAN</span></div>
+            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide CARTESIAN" aria-label="Hide CARTESIAN column" onClick={() => setPanelVisible('cartesian', false)}><HiddenIcon /></button><span className="eyebrow">CARTESIAN</span></div>
             <button type="button" className="current-pose-button" onClick={fillCurrentPose}>Use current</button>
           </div>
           <form className="ik-section" onSubmit={(event) => { event.preventDefault(); solveInverseKinematics(); }}>
