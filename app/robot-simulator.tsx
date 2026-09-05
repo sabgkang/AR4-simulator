@@ -2,28 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { createJointMotion, DEFAULT_MAX_SPEEDS, type JointValues } from './teensy-motion';
 import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint } from './teensy-linear-motion';
 import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
-
-type Pose = [number, number, number, number, number, number];
-type TcpPose = { x: number; y: number; z: number; rx: number; ry: number; rz: number };
-type IkTarget = Record<'x' | 'y' | 'z' | 'rx' | 'ry' | 'rz', string>;
-type SettingsCategory = 'com' | 'ranges' | 'motors';
-type JointRange = { min: number; max: number };
-type SerialPortLike = { getInfo: () => { usbVendorId?: number; usbProductId?: number } };
-type MoveJointsCommand = { cmd: 'move_joints'; j: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number };
-type MoveJCommand = { cmd: 'move_j'; pose: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
-type MoveLCommand = { cmd: 'move_l'; pose: number[]; ext?: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; rounding?: number; w?: string };
-type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
-type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
-type PanelKey = 'plan' | 'angles' | 'cartesian';
-type PlanTarget = { id: number; name: string; pose: TcpPose; visible: boolean };
-type PlanCommand = { id: number; type: 'move_j' | 'move_l'; startTargetId: number | null; endTargetId: number; speed: number; acceleration: number; deceleration: number };
-type RobotPositionResponse = ReturnType<typeof createPositionResponse>;
-type CommandResponse = typeof HELLO_RESPONSE | RobotPositionResponse | { msg: 'error'; data: string };
+import { AnglesPanel, CartesianPanel } from './robot-simulator/control-panels';
+import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS, TOOL_TIP_OFFSET } from './robot-simulator/config';
+import { saveJsonFile } from './robot-simulator/file-io';
+import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
+import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
+import { chainPlanCommands, createPlanFilename, parsePlan, serializePlan } from './robot-simulator/plan';
+import { CommandDialog, TargetDialog } from './robot-simulator/plan-dialogs';
+import { createSettingsFilename, parseSettings, serializeSettings, type SimulatorSettings } from './robot-simulator/settings-file';
+import { SettingsModal } from './robot-simulator/settings-modal';
+import type { CommandResponse, IkTarget, JointRange, MotionCommand, PanelKey, PlanCommand, PlanTarget, Pose, SerialPortLike, SettingsCategory, StatusMessage, TcpPose, TestCommandName } from './robot-simulator/types';
+import { useRobotScene } from './robot-simulator/use-robot-scene';
 
 declare global {
   interface Window {
@@ -31,242 +23,20 @@ declare global {
   }
 }
 
-const JOINTS = [
-  { name: 'J1', label: 'Base', min: -170, max: 170, accent: '#2563eb' },
-  { name: 'J2', label: 'Shoulder', min: -42, max: 90, accent: '#7c3aed' },
-  { name: 'J3', label: 'Elbow', min: -89, max: 52, accent: '#0891b2' },
-  { name: 'J4', label: 'Wrist roll', min: -165, max: 165, accent: '#059669' },
-  { name: 'J5', label: 'Wrist bend', min: -105, max: 105, accent: '#d97706' },
-  { name: 'J6', label: 'Tool roll', min: -155, max: 155, accent: '#dc2626' },
-] as const;
-
-const DEFAULT_JOINT_RANGES: JointRange[] = JOINTS.map(({ min, max }) => ({ min, max }));
-const DEFAULT_MOTOR_SPEEDS: Pose = DEFAULT_MAX_SPEEDS.slice(0, 6) as Pose;
-
-const JOINT_ZERO_OFFSETS: Pose = [Math.PI / 2, 0, 0, 0, 0, 0];
-
-const PRESETS: Record<string, Pose> = {
-  Home: [0, 0, 0, 0, 0, 0],
-  Upright: [0, 0, -89, 0, 0, 0],
-  Inspect: [0, 45, 20, 0, 0, 0],
-};
-
-const MESH_ROOT = '/meshes/ar4_mk5/';
-const TOOL_TIP_OFFSET = 0.0;
-const TOOL_TIP_MARKER_RADIUS = 0.01;
-const TCP_AXIS_LENGTH = 0.05;
-const TCP_AXIS_THICKNESS = 0.005;
-const TCP_FRAME_ROTATION_Z = -Math.PI / 2;
-const BASE_AXIS_LENGTH = 0.1;
-const BASE_AXIS_THICKNESS = 0.005;
-const LINK_MESHES = [
-  ['Link_1_Aluminum.STL', 'Link_1_Motor.STL'],
-  ['Link_2_Aluminum.STL', 'Link_2_Motor.STL', 'Link_2_Cover.STL', 'Link_2_Logo.STL'],
-  ['Link_3_Aluminum.STL', 'Link_3_Motor.STL'],
-  ['Link_4_Aluminum.STL', 'Link_4_Motor.STL', 'Link_4_Cover.STL', 'Link_4_Logo.STL'],
-  ['Link_5_Aluminum.STL', 'Link_5_Motor.STL'],
-  ['Link_6_Aluminum.STL'],
-];
-
-const LINK_MESH_TRANSFORMS = [
-  { xyz: [0, 0, 0], rpy: [0, 0, 0] },
-  { xyz: [0, 0, -0.00887], rpy: [Math.PI, 0, 0] },
-  { xyz: [0, 0, -0.03671], rpy: [0, 0, 0] },
-  { xyz: [0, 0, -0.07594], rpy: [0, 0, -Math.PI / 2] },
-  { xyz: [0, 0, -0.0275], rpy: [0, 0, 0] },
-  { xyz: [0, 0, -0.016], rpy: [0, 0, 0] },
-] as const;
-
-function chainPlanCommands(commands: PlanCommand[], firstTargetId: number | null) {
-  let startTargetId = firstTargetId;
-  return commands.map((command) => {
-    const chained = { ...command, startTargetId };
-    startTargetId = chained.endTargetId;
-    return chained;
-  });
-}
-
-const JOINT_FRAMES = [
-  { xyz: [0, 0, 0.092], rpy: [Math.PI, 0, 0], axis: [0, 0, -1] },
-  { xyz: [0, 0.06415, -0.07778], rpy: [Math.PI / 2, 0, -Math.PI / 2], axis: [0, 0, -1] },
-  { xyz: [0, -0.305, 0], rpy: [0, 0, Math.PI], axis: [0, 0, -1] },
-  { xyz: [0, 0, 0], rpy: [Math.PI / 2, 0, -Math.PI / 2], axis: [0, 0, -1] },
-  { xyz: [0, 0, -0.22294], rpy: [Math.PI, 0, -Math.PI / 2], axis: [1, 0, 0] },
-  { xyz: [0, 0, 0.041], rpy: [0, 0, 0], axis: [0, 0, 1] },
-] as const;
-
-function materialFor(name: string) {
-  let color = 0xb8c0cc, roughness = 0.42, metalness = 0.58;
-  if (name.includes('Motor')) { color = 0x20242b; roughness = 0.6; metalness = 0.25; }
-  else if (name.includes('Cover')) { color = 0xf4f5f7; roughness = 0.72; metalness = 0.04; }
-  else if (name.includes('Logo')) { color = 0x1746e0; roughness = 0.5; metalness = 0.08; }
-  else if (name.includes('Enclosure')) { color = 0xe9edf2; roughness = 0.78; metalness = 0.03; }
-  return new THREE.MeshStandardMaterial({ color, roughness, metalness });
-}
-
-function setFrame(object: THREE.Object3D, xyz: readonly number[], rpy: readonly number[]) {
-  object.position.set(xyz[0], xyz[1], xyz[2]);
-  object.rotation.set(rpy[0], rpy[1], rpy[2], 'ZYX');
-}
-
-function getTcpWorldQuaternion(end: THREE.Object3D) {
-  const tcpRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), TCP_FRAME_ROTATION_Z);
-  return end.getWorldQuaternion(new THREE.Quaternion()).multiply(tcpRotation);
-}
-
-function rotationVector(from: THREE.Quaternion, to: THREE.Quaternion) {
-  const delta = to.clone().multiply(from.clone().invert()).normalize();
-  if (delta.w < 0) delta.set(-delta.x, -delta.y, -delta.z, -delta.w);
-  const angle = 2 * Math.acos(THREE.MathUtils.clamp(delta.w, -1, 1));
-  const scale = Math.sqrt(Math.max(0, 1 - delta.w * delta.w));
-  if (scale < 1e-8 || angle < 1e-8) return new THREE.Vector3();
-  return new THREE.Vector3(delta.x / scale, delta.y / scale, delta.z / scale).multiplyScalar(angle);
-}
-
-function solveLinearSystem(matrix: number[][], vector: number[]) {
-  const size = vector.length;
-  const augmented = matrix.map((row, index) => [...row, vector[index]]);
-  for (let column = 0; column < size; column += 1) {
-    let pivot = column;
-    for (let row = column + 1; row < size; row += 1) {
-      if (Math.abs(augmented[row][column]) > Math.abs(augmented[pivot][column])) pivot = row;
-    }
-    if (Math.abs(augmented[pivot][column]) < 1e-10) return null;
-    [augmented[column], augmented[pivot]] = [augmented[pivot], augmented[column]];
-    const divisor = augmented[column][column];
-    for (let entry = column; entry <= size; entry += 1) augmented[column][entry] /= divisor;
-    for (let row = 0; row < size; row += 1) {
-      if (row === column) continue;
-      const factor = augmented[row][column];
-      for (let entry = column; entry <= size; entry += 1) augmented[row][entry] -= factor * augmented[column][entry];
-    }
-  }
-  return augmented.map((row) => row[size]);
-}
-
-function angularDifferenceDegrees(value: number, reference: number) {
-  return ((value - reference + 540) % 360) - 180;
-}
-
-function JointAngleInput({
-  name,
-  value,
-  min,
-  max,
-  onChange,
-}: {
-  name: string;
-  value: number;
-  min: number;
-  max: number;
-  onChange: (value: number) => void;
-}) {
-  const formatAngle = (angle: number) => String(Math.round(angle * 100) / 100);
-  const [draft, setDraft] = useState(formatAngle(value));
-  const focused = useRef(false);
-
-  useEffect(() => {
-    if (!focused.current) setDraft(formatAngle(value));
-  }, [value]);
-
-  const commit = () => {
-    const parsed = Number(draft);
-    const next = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value;
-    onChange(next);
-    setDraft(formatAngle(next));
-  };
-
-  return (
-    <span className="angle-input-wrap">
-      <input
-        className="angle-input"
-        aria-label={`${name} angle in degrees`}
-        type="number"
-        min={min}
-        max={max}
-        step="0.01"
-        value={draft}
-        onFocus={() => { focused.current = true; }}
-        onChange={(event) => {
-          const nextDraft = event.target.value;
-          setDraft(nextDraft);
-          const parsed = Number(nextDraft);
-          if (nextDraft !== '' && Number.isFinite(parsed) && parsed >= min && parsed <= max) onChange(parsed);
-        }}
-        onBlur={() => { focused.current = false; commit(); }}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') event.currentTarget.blur();
-          if (event.key === 'Escape') {
-            setDraft(formatAngle(value));
-            event.currentTarget.blur();
-          }
-        }}
-      />
-      <small>°</small>
-    </span>
-  );
-}
-
-function GearIcon() {
-  return <span className="gear-icon" aria-hidden="true">⚙</span>;
-}
-
-function ViewIcon() {
-  return <svg className="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.75" /></svg>;
-}
-
-function HiddenIcon() {
-  return <svg className="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.2A9.8 9.8 0 0 1 12 6c6 0 9.5 6 9.5 6a14 14 0 0 1-2.1 2.8M7.1 7.1C4.2 8.8 2.5 12 2.5 12s3.5 6 9.5 6c1.4 0 2.7-.3 3.8-.8M9.9 9.9a3 3 0 0 0 4.2 4.2" /></svg>;
-}
-
-function EditIcon() {
-  return <svg className="edit-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l10.8-10.8-4-4L4 16Z" /><path d="m13.8 6.2 4 4" /></svg>;
-}
-
-function DeleteIcon() {
-  return <svg className="delete-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>;
-}
-
-function LoadIcon() {
-  return <svg className="file-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v3h16v-3" /></svg>;
-}
-
-function SaveIcon() {
-  return <svg className="file-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9m-4 4 4-4 4 4M4 7V4h16v3" /></svg>;
-}
-
-function RunIcon() {
-  return <svg className="run-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z" /></svg>;
-}
-
-function PreviewIcon() {
-  return <svg className="plan-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.75" /></svg>;
-}
-
-function ExportIcon() {
-  return <svg className="plan-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 13v6H5V6h6" /></svg>;
-}
-
-function PlusIcon() {
-  return <svg className="plus-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
-}
-
 export default function RobotSimulator() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const jointRotors = useRef<THREE.Group[]>([]);
-  const axes = useRef<THREE.Vector3[]>([]);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const controlsRef = useRef<OrbitControls | null>(null);
   const animationRef = useRef<number | null>(null);
-  const targetFramesRef = useRef<THREE.Group | null>(null);
   const nextTargetIdRef = useRef(1);
   const nextCommandIdRef = useRef(1);
   const planFileInputRef = useRef<HTMLInputElement>(null);
+  const planLoadRequestRef = useRef(0);
+  const settingsLoadRequestRef = useRef(0);
   const homeTargetInitializedRef = useRef(false);
   const anglesRef = useRef<Pose>(PRESETS.Home);
   const tcpRef = useRef<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
   const externalAxesRef = useRef<[number, number, number]>([0, 0, 0]);
   const runningRef = useRef(false);
+  const planExecutionRef = useRef<'preview' | 'run' | null>(null);
   const ikInitialized = useRef(false);
   const [angles, setAngles] = useState<Pose>(PRESETS.Home);
   const [tcp, setTcp] = useState<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
@@ -286,6 +56,8 @@ export default function RobotSimulator() {
   const [serialPortName, setSerialPortName] = useState('No COM port selected');
   const [auxiliarySerialPortNames, setAuxiliarySerialPortNames] = useState<string[]>([]);
   const [serialMessage, setSerialMessage] = useState<string | null>(null);
+  const [settingsFilename, setSettingsFilename] = useState('Default settings');
+  const [settingsFileMessage, setSettingsFileMessage] = useState<StatusMessage | null>(null);
   const [visiblePanels, setVisiblePanels] = useState<Record<PanelKey, boolean>>({ plan: true, angles: true, cartesian: true });
   const [planTargets, setPlanTargets] = useState<PlanTarget[]>([]);
   const [planCommands, setPlanCommands] = useState<PlanCommand[]>([]);
@@ -294,15 +66,77 @@ export default function RobotSimulator() {
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [targetDraft, setTargetDraft] = useState<PlanTarget | null>(null);
   const [commandDraft, setCommandDraft] = useState<PlanCommand | null>(null);
-  const [planFileMessage, setPlanFileMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [planFileMessage, setPlanFileMessage] = useState<StatusMessage | null>(null);
   const [planFilename, setPlanFilename] = useState<string | null>(null);
   const [planExecution, setPlanExecution] = useState<'preview' | 'run' | null>(null);
   const [planExecutionMessage, setPlanExecutionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const { jointRotors, axes, cameraRef, controlsRef } = useRobotScene(canvasRef, planTargets, setLoaded);
+
+  const applySettings = useCallback((settings: SimulatorSettings) => {
+    setJointRanges(settings.jointRanges.map((range) => ({ ...range })));
+    setMotorSpeeds([...settings.motorSpeeds] as Pose);
+    setSpeedPercent(settings.motion.speedPercent);
+    setAccelerationPercent(settings.motion.accelerationPercent);
+    setDecelerationPercent(settings.motion.decelerationPercent);
+    setSerialPortName('No COM port selected');
+    setAuxiliarySerialPortNames(settings.serial.auxiliaryPortNames.map(() => 'No COM port selected'));
+    setAngles((current) => current.map((angle, index) => Math.min(settings.jointRanges[index].max, Math.max(settings.jointRanges[index].min, angle))) as Pose);
+  }, [setAccelerationPercent, setAngles, setAuxiliarySerialPortNames, setDecelerationPercent, setJointRanges, setMotorSpeeds, setSerialPortName, setSpeedPercent]);
+
+  const currentSettings = (): SimulatorSettings => ({
+    version: 1,
+    jointRanges: jointRanges.map((range) => ({ ...range })),
+    motorSpeeds: [...motorSpeeds] as Pose,
+    motion: { speedPercent, accelerationPercent, decelerationPercent },
+    serial: { portName: serialPortName, auxiliaryPortNames: [...auxiliarySerialPortNames] },
+  });
+
+  const saveSettings = async () => {
+    setSettingsFileMessage(null);
+    const filename = createSettingsFilename();
+    const settings = currentSettings();
+    try {
+      const result = await saveJsonFile(filename, serializeSettings(settings));
+      if (result.status === 'saved') {
+        setSettingsFilename(result.filename);
+        setSettingsFileMessage({ type: 'success', text: 'Settings saved.' });
+      } else if (result.status === 'download-started') {
+        setSettingsFileMessage({ type: 'info', text: 'Download started. Confirm the file in your browser.' });
+      }
+    } catch (error) {
+      setSettingsFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to save settings.' });
+    }
+  };
+
+  const loadSettings = async (file: File) => {
+    if (runningRef.current || planExecutionRef.current !== null) {
+      setSettingsFileMessage({ type: 'error', text: 'Stop the current motion before loading settings.' });
+      return;
+    }
+    const requestId = ++settingsLoadRequestRef.current;
+    try {
+      const settings = parseSettings(JSON.parse(await file.text()) as unknown);
+      if (requestId !== settingsLoadRequestRef.current) return;
+      if (runningRef.current || planExecutionRef.current !== null) {
+        setSettingsFileMessage({ type: 'error', text: 'Settings were not loaded because a motion started.' });
+        return;
+      }
+      applySettings(settings);
+      setSerialMessage('Select serial ports again after loading settings.');
+      setSettingsFilename(file.name);
+      setSettingsFileMessage({ type: 'success', text: 'Settings loaded.' });
+    } catch (error) {
+      if (requestId !== settingsLoadRequestRef.current) return;
+      setSettingsFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to load settings.' });
+    }
+  };
 
   const setPanelVisible = (panel: PanelKey, visible: boolean) => {
     setVisiblePanels((current) => ({ ...current, [panel]: visible }));
   };
   const visiblePanelCount = Object.values(visiblePanels).filter(Boolean).length;
+  const stackCartesian = visiblePanels.angles && visiblePanels.cartesian;
+  const visibleColumnCount = visiblePanelCount - (stackCartesian ? 1 : 0);
   const addTargetAfter = (afterId: number) => {
     const id = nextTargetIdRef.current++;
     const target = { id, name: `Target${id}`, pose: { ...tcpRef.current }, visible: true };
@@ -359,53 +193,65 @@ export default function RobotSimulator() {
     setCommandInsertAfterId(null);
   };
 
-  const savePlan = () => {
-    const content = JSON.stringify({ version: 1, targets: planTargets, commands: planCommands }, null, 2);
-    const now = new Date();
-    const pad = (value: number) => String(value).padStart(2, '0');
-    const filename = planFilename ?? `ar4-plan${now.getFullYear()}:${pad(now.getMonth() + 1)}:${pad(now.getDate())}:${pad(now.getHours())}:${pad(now.getMinutes())}.json`;
-    const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-    setPlanFilename(filename);
-    setPlanFileMessage({ type: 'success', text: 'Plan saved.' });
+  const addFirstPlanCommand = () => {
+    const firstTarget = planTargets[0];
+    if (!firstTarget) return;
+    const command: PlanCommand = {
+      id: nextCommandIdRef.current++,
+      type: 'move_j',
+      startTargetId: null,
+      endTargetId: firstTarget.id,
+      speed: speedPercent,
+      acceleration: accelerationPercent,
+      deceleration: decelerationPercent,
+    };
+    setPlanCommands((current) => current.length === 0 ? [command] : current);
+  };
+
+  const savePlan = async () => {
+    setPlanFileMessage(null);
+    const filename = createPlanFilename();
+    try {
+      const result = await saveJsonFile(filename, serializePlan(planTargets, planCommands));
+      if (result.status === 'saved') {
+        setPlanFilename(result.filename);
+        setPlanFileMessage({ type: 'success', text: 'Plan saved.' });
+      } else if (result.status === 'download-started') {
+        setPlanFileMessage({ type: 'info', text: 'Download started. Confirm the file in your browser.' });
+      }
+    } catch (error) {
+      setPlanFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to save plan.' });
+    }
   };
 
   const loadPlan = async (file: File) => {
+    if (runningRef.current || planExecutionRef.current !== null) {
+      setPlanFileMessage({ type: 'error', text: 'Stop the current motion before loading a plan.' });
+      return;
+    }
+    const requestId = ++planLoadRequestRef.current;
     try {
-      const parsed = JSON.parse(await file.text()) as { version?: unknown; targets?: unknown; commands?: unknown };
-      if (parsed.version !== 1 || !Array.isArray(parsed.targets) || !Array.isArray(parsed.commands)) throw new Error('Unsupported plan format.');
-      const poseKeys: Array<keyof TcpPose> = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
-      const targets = parsed.targets.filter((target): target is PlanTarget => {
-        if (!target || typeof target !== 'object') return false;
-        const candidate = target as Partial<PlanTarget>;
-        return Number.isInteger(candidate.id) && typeof candidate.name === 'string' && typeof candidate.visible === 'boolean'
-          && !!candidate.pose && poseKeys.every((key) => typeof candidate.pose?.[key] === 'number' && Number.isFinite(candidate.pose[key]));
-      });
-      const targetIds = new Set(targets.map((target) => target.id));
-      const commands = parsed.commands.filter((command): command is PlanCommand => {
-        if (!command || typeof command !== 'object') return false;
-        const candidate = command as Partial<PlanCommand>;
-        return Number.isInteger(candidate.id) && (candidate.type === 'move_j' || candidate.type === 'move_l')
-          && (candidate.startTargetId === null || targetIds.has(candidate.startTargetId ?? -1)) && targetIds.has(candidate.endTargetId ?? -1)
-          && [candidate.speed, candidate.acceleration, candidate.deceleration].every((value) => typeof value === 'number' && Number.isFinite(value));
-      });
-      if (targets.length !== parsed.targets.length || commands.length !== parsed.commands.length) throw new Error('The plan contains invalid targets or commands.');
+      const { targets, commands } = parsePlan(JSON.parse(await file.text()) as unknown);
+      if (requestId !== planLoadRequestRef.current) return;
+      if (runningRef.current || planExecutionRef.current !== null) {
+        setPlanFileMessage({ type: 'error', text: 'The plan was not loaded because a motion started.' });
+        return;
+      }
       setPlanTargets(targets);
-      setPlanCommands(chainPlanCommands(commands, commands[0]?.startTargetId ?? null));
+      setPlanCommands(commands);
       setPlanFilename(file.name);
       homeTargetInitializedRef.current = true;
       nextTargetIdRef.current = Math.max(0, ...targets.map((target) => target.id)) + 1;
       nextCommandIdRef.current = Math.max(0, ...commands.map((command) => command.id)) + 1;
       setPlanFileMessage({ type: 'success', text: `Loaded ${targets.length} targets and ${commands.length} commands.` });
     } catch (error) {
+      if (requestId !== planLoadRequestRef.current) return;
       setPlanFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to load plan.' });
     }
   };
 
+  // Mutable Three.js scene refs are stable even though their contents load asynchronously.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const updateTcp = useCallback(() => {
     const end = jointRotors.current[5];
     if (!end) return;
@@ -423,8 +269,9 @@ export default function RobotSimulator() {
     };
     tcpRef.current = nextTcp;
     setTcp(nextTcp);
-  }, []);
+  }, [jointRotors]);
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const getPoseForJoints = useCallback((jointValues: Pose) => {
     if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
       throw new Error('The robot model is still loading. Try again in a moment.');
@@ -453,7 +300,7 @@ export default function RobotSimulator() {
     } finally {
       applyJoints(displayedJoints);
     }
-  }, []);
+  }, [axes, jointRotors]);
 
   const fillCurrentPose = useCallback(() => {
     setIkTarget({
@@ -487,272 +334,6 @@ export default function RobotSimulator() {
     });
   }, [loaded, getPoseForJoints, speedPercent, accelerationPercent, decelerationPercent]);
 
-  useEffect(() => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf4f6f9);
-    scene.fog = new THREE.Fog(0xf4f6f9, 1.8, 3.4);
-    const targetFrames = new THREE.Group();
-    targetFrames.name = 'Plan targets';
-    scene.add(targetFrames);
-    targetFramesRef.current = targetFrames;
-
-    const camera = new THREE.PerspectiveCamera(34, 1, 0.01, 20);
-    camera.position.set(1.05, -1.15, 0.78);
-    camera.up.set(0, 0, 1);
-    cameraRef.current = camera;
-
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.target.set(0, 0, 0.31);
-    controls.minDistance = 0.48;
-    controls.maxDistance = 2.7;
-    controlsRef.current = controls;
-
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x718096, 2.3));
-    const key = new THREE.DirectionalLight(0xffffff, 4.2);
-    key.position.set(-0.8, -0.9, 1.8);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    key.shadow.camera.left = -1; key.shadow.camera.right = 1; key.shadow.camera.top = 1; key.shadow.camera.bottom = -1;
-    scene.add(key);
-    const fill = new THREE.DirectionalLight(0x9fc0ff, 1.4);
-    fill.position.set(1.4, 0.4, 0.9);
-    scene.add(fill);
-
-    const grid = new THREE.GridHelper(2.4, 24, 0xc3cad5, 0xdfe4eb);
-    grid.rotation.x = Math.PI / 2;
-    grid.position.z = -0.002;
-    (grid.material as THREE.Material).opacity = 0.56;
-    (grid.material as THREE.Material).transparent = true;
-    scene.add(grid);
-    const floor = new THREE.Mesh(new THREE.CircleGeometry(1.2, 96), new THREE.ShadowMaterial({ color: 0x627087, opacity: 0.13 }));
-    floor.receiveShadow = true;
-    scene.add(floor);
-
-    const loader = new STLLoader();
-    const disposables: Array<THREE.BufferGeometry | THREE.Material> = [];
-    const baseFrame = new THREE.Group();
-    baseFrame.name = 'Base reference frame';
-    [
-      { direction: new THREE.Vector3(1, 0, 0), color: 0xef233c },
-      { direction: new THREE.Vector3(0, 1, 0), color: 0x16a34a },
-      { direction: new THREE.Vector3(0, 0, 1), color: 0x2563eb },
-    ].forEach(({ direction, color }) => {
-      const headLength = 0.022;
-      const shaftLength = BASE_AXIS_LENGTH - headLength;
-      const material = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
-      const shaftGeometry = new THREE.CylinderGeometry(BASE_AXIS_THICKNESS / 2, BASE_AXIS_THICKNESS / 2, shaftLength, 16);
-      const headGeometry = new THREE.CylinderGeometry(0, BASE_AXIS_THICKNESS * 1.5, headLength, 20);
-      const shaft = new THREE.Mesh(shaftGeometry, material);
-      const head = new THREE.Mesh(headGeometry, material);
-      shaft.position.y = shaftLength / 2;
-      head.position.y = shaftLength + headLength / 2;
-      shaft.renderOrder = 20;
-      head.renderOrder = 20;
-      const arrow = new THREE.Group();
-      arrow.add(shaft, head);
-      arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
-      baseFrame.add(arrow);
-      disposables.push(shaftGeometry, headGeometry, material);
-    });
-    scene.add(baseFrame);
-
-    const loadMesh = (parent: THREE.Object3D, name: string, transform = { xyz: [0, 0, 0] as const, rpy: [0, 0, 0] as const }) => {
-      loader.load(MESH_ROOT + name, (geometry) => {
-        geometry.computeVertexNormals();
-        const material = materialFor(name);
-        const mesh = new THREE.Mesh(geometry, material);
-        setFrame(mesh, transform.xyz, transform.rpy);
-        mesh.castShadow = true; mesh.receiveShadow = true;
-        parent.add(mesh);
-        disposables.push(geometry, material);
-        setLoaded((value) => value + 1);
-      }, undefined, () => setLoaded((value) => value + 1));
-    };
-
-    loadMesh(scene, 'Link_Base_Aluminum.STL');
-    loadMesh(scene, 'Link_Base_Enclosure.STL');
-    loadMesh(scene, 'Link_Base_Motor.STL');
-
-    jointRotors.current = [];
-    axes.current = [];
-    let parent: THREE.Object3D = scene;
-    JOINT_FRAMES.forEach((frame, index) => {
-      const fixedFrame = new THREE.Group();
-      setFrame(fixedFrame, frame.xyz, frame.rpy);
-      parent.add(fixedFrame);
-      const rotor = new THREE.Group();
-      fixedFrame.add(rotor);
-      jointRotors.current.push(rotor);
-      axes.current.push(new THREE.Vector3(frame.axis[0], frame.axis[1], frame.axis[2]));
-      LINK_MESHES[index].forEach((name) => loadMesh(rotor, name, LINK_MESH_TRANSFORMS[index]));
-      parent = rotor;
-    });
-
-    const toolTipGeometry = new THREE.SphereGeometry(TOOL_TIP_MARKER_RADIUS, 32, 20);
-    const toolTipMaterial = new THREE.MeshStandardMaterial({
-      color: 0xe11d48,
-      emissive: 0x4a0617,
-      emissiveIntensity: 0.35,
-      roughness: 0.32,
-      metalness: 0.08,
-    });
-    const tcpFrame = new THREE.Group();
-    tcpFrame.name = 'TCP frame';
-    tcpFrame.position.set(0, 0, TOOL_TIP_OFFSET);
-    tcpFrame.rotation.z = TCP_FRAME_ROTATION_Z;
-    const toolTipMarker = new THREE.Mesh(toolTipGeometry, toolTipMaterial);
-    toolTipMarker.name = 'Tool tip center';
-    toolTipMarker.castShadow = true;
-    toolTipMarker.receiveShadow = true;
-    tcpFrame.add(toolTipMarker);
-
-    const tcpAxes = [
-      { direction: new THREE.Vector3(1, 0, 0), color: 0xef233c },
-      { direction: new THREE.Vector3(0, 1, 0), color: 0x16a34a },
-      { direction: new THREE.Vector3(0, 0, 1), color: 0x2563eb },
-    ];
-    tcpAxes.forEach(({ direction, color }) => {
-      const headLength = 0.014;
-      const shaftLength = TCP_AXIS_LENGTH - headLength;
-      const material = new THREE.MeshStandardMaterial({ color, roughness: 0.3, metalness: 0.05 });
-      const shaftGeometry = new THREE.CylinderGeometry(TCP_AXIS_THICKNESS / 2, TCP_AXIS_THICKNESS / 2, shaftLength, 16);
-      const headGeometry = new THREE.CylinderGeometry(0, TCP_AXIS_THICKNESS * 1.4, headLength, 20);
-      const shaft = new THREE.Mesh(shaftGeometry, material);
-      const head = new THREE.Mesh(headGeometry, material);
-      shaft.position.y = shaftLength / 2;
-      head.position.y = shaftLength + headLength / 2;
-      shaft.castShadow = true;
-      head.castShadow = true;
-      const arrow = new THREE.Group();
-      arrow.add(shaft, head);
-      arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
-      tcpFrame.add(arrow);
-      disposables.push(shaftGeometry, headGeometry, material);
-    });
-    jointRotors.current[5].add(tcpFrame);
-    disposables.push(toolTipGeometry, toolTipMaterial);
-
-    let resizeFrame = 0;
-    let lastWidth = 0;
-    let lastHeight = 0;
-    const resize = () => {
-      if (resizeFrame) return;
-      resizeFrame = requestAnimationFrame(() => {
-        resizeFrame = 0;
-        const target = canvas.parentElement ?? canvas;
-        const rect = target.getBoundingClientRect();
-        const width = Math.max(1, Math.round(rect.width));
-        const height = Math.max(1, Math.round(rect.height));
-        if (width === lastWidth && height === lastHeight) return;
-        lastWidth = width;
-        lastHeight = height;
-        renderer.setSize(width, height, false);
-        camera.aspect = width / height;
-        camera.updateProjectionMatrix();
-      });
-    };
-    const observer = new ResizeObserver(resize);
-    observer.observe(canvas.parentElement ?? canvas);
-    resize();
-    let frameId = 0;
-    const render = () => { controls.update(); renderer.render(scene, camera); frameId = requestAnimationFrame(render); };
-    render();
-
-    return () => {
-      observer.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(frameId); controls.dispose(); renderer.dispose();
-      targetFramesRef.current = null;
-      disposables.forEach((item) => item.dispose());
-    };
-  }, []);
-
-  useEffect(() => {
-    const root = targetFramesRef.current;
-    if (!root) return;
-
-    root.clear();
-    const resources: Array<THREE.BufferGeometry | THREE.Material | THREE.Texture> = [];
-    planTargets.filter((target) => target.visible).forEach((target) => {
-      const marker = new THREE.Group();
-      marker.position.set(target.pose.x / 1000, target.pose.y / 1000, target.pose.z / 1000);
-      const targetFrame = new THREE.Group();
-      targetFrame.rotation.set(
-        THREE.MathUtils.degToRad(target.pose.rx),
-        THREE.MathUtils.degToRad(target.pose.ry),
-        THREE.MathUtils.degToRad(target.pose.rz),
-        'XYZ',
-      );
-      const originGeometry = new THREE.SphereGeometry(TOOL_TIP_MARKER_RADIUS, 32, 20);
-      const originMaterial = new THREE.MeshStandardMaterial({ color: 0xe11d48, emissive: 0x4a0617, emissiveIntensity: 0.35, roughness: 0.32, metalness: 0.08 });
-      targetFrame.add(new THREE.Mesh(originGeometry, originMaterial));
-      resources.push(originGeometry, originMaterial);
-      [
-        { direction: new THREE.Vector3(1, 0, 0), color: 0xef233c },
-        { direction: new THREE.Vector3(0, 1, 0), color: 0x16a34a },
-        { direction: new THREE.Vector3(0, 0, 1), color: 0x2563eb },
-      ].forEach(({ direction, color }) => {
-        const headLength = 0.014;
-        const shaftLength = TCP_AXIS_LENGTH - headLength;
-        const material = new THREE.MeshStandardMaterial({ color, roughness: 0.3, metalness: 0.05 });
-        const shaftGeometry = new THREE.CylinderGeometry(TCP_AXIS_THICKNESS / 2, TCP_AXIS_THICKNESS / 2, shaftLength, 16);
-        const headGeometry = new THREE.CylinderGeometry(0, TCP_AXIS_THICKNESS * 1.4, headLength, 20);
-        const shaft = new THREE.Mesh(shaftGeometry, material);
-        const head = new THREE.Mesh(headGeometry, material);
-        shaft.position.y = shaftLength / 2;
-        head.position.y = shaftLength + headLength / 2;
-        const arrow = new THREE.Group();
-        arrow.add(shaft, head);
-        arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
-        targetFrame.add(arrow);
-        resources.push(shaftGeometry, headGeometry, material);
-      });
-      marker.add(targetFrame);
-
-      const labelCanvas = document.createElement('canvas');
-      labelCanvas.width = 256;
-      labelCanvas.height = 64;
-      const context = labelCanvas.getContext('2d');
-      if (context) {
-        context.fillStyle = 'rgba(255,255,255,.94)';
-        context.strokeStyle = '#cfd6e2';
-        context.lineWidth = 3;
-        context.beginPath();
-        context.roundRect(2, 2, 252, 60, 11);
-        context.fill();
-        context.stroke();
-        context.fillStyle = '#1d2939';
-        context.font = '700 27px Arial';
-        context.textAlign = 'center';
-        context.textBaseline = 'middle';
-        context.fillText(target.name, 128, 33, 232);
-      }
-      const texture = new THREE.CanvasTexture(labelCanvas);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      const labelMaterial = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true });
-      const label = new THREE.Sprite(labelMaterial);
-      label.position.set(0, 0, 0.045);
-      label.scale.set(0.09, 0.0225, 1);
-      label.renderOrder = 21;
-      marker.add(label);
-      resources.push(texture, labelMaterial);
-      root.add(marker);
-    });
-
-    return () => {
-      root.clear();
-      resources.forEach((resource) => resource.dispose());
-    };
-  }, [planTargets]);
 
   useEffect(() => {
     anglesRef.current = angles;
@@ -760,8 +341,9 @@ export default function RobotSimulator() {
       axes.current[index],
       THREE.MathUtils.degToRad(angles[index]) + JOINT_ZERO_OFFSETS[index],
     ));
-    updateTcp();
-  }, [angles, updateTcp, loaded]);
+    const frame = requestAnimationFrame(updateTcp);
+    return () => cancelAnimationFrame(frame);
+  }, [angles, axes, jointRotors, updateTcp, loaded]);
 
   const setJoint = (index: number, value: number) => {
     if (runningRef.current) return;
@@ -800,6 +382,7 @@ export default function RobotSimulator() {
     void moveToAsync(target);
   };
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const solvePose = useCallback((values: Pose, wristConfiguration = 'A', referenceJoints: Pose = anglesRef.current, preferContinuation = false) => {
     if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
       throw new Error('The robot model is still loading. Try again in a moment.');
@@ -967,7 +550,7 @@ export default function RobotSimulator() {
     } finally {
       applyRadians(displayedRadians);
     }
-  }, [jointRanges]);
+  }, [axes, jointRanges, jointRotors]);
 
   const solveInverseKinematics = () => {
     const keys: Array<keyof IkTarget> = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
@@ -1009,7 +592,8 @@ export default function RobotSimulator() {
   };
 
   const previewPlan = async () => {
-    if (planExecution || runningRef.current || planCommands.length === 0) return;
+    if (planExecutionRef.current || runningRef.current || planCommands.length === 0) return;
+    planExecutionRef.current = 'preview';
     setPlanExecution('preview');
     setPlanExecutionMessage(null);
     try {
@@ -1026,12 +610,14 @@ export default function RobotSimulator() {
     } catch (error) {
       setPlanExecutionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Preview failed.' });
     } finally {
+      planExecutionRef.current = null;
       setPlanExecution(null);
     }
   };
 
   const runPlan = async () => {
-    if (planExecution || runningRef.current || planCommands.length === 0) return;
+    if (planExecutionRef.current || runningRef.current || planCommands.length === 0) return;
+    planExecutionRef.current = 'run';
     setPlanExecution('run');
     setPlanExecutionMessage(null);
     try {
@@ -1059,6 +645,7 @@ export default function RobotSimulator() {
     } catch (error) {
       setPlanExecutionMessage({ type: 'error', text: error instanceof Error ? error.message : 'Plan failed.' });
     } finally {
+      planExecutionRef.current = null;
       setPlanExecution(null);
     }
   };
@@ -1342,7 +929,7 @@ export default function RobotSimulator() {
 
     window.ar4Simulator = { executeCommand };
     return () => { delete window.ar4Simulator; };
-  }, [accelerationPercent, decelerationPercent, getPoseForJoints, jointRanges, motorSpeeds, solvePose, speedPercent]);
+  }, [accelerationPercent, decelerationPercent, getPoseForJoints, jointRanges, jointRotors, motorSpeeds, solvePose, speedPercent]);
 
   const runTestCommand = async (commandName: TestCommandName) => {
     const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
@@ -1387,7 +974,6 @@ export default function RobotSimulator() {
       <header className="topbar">
         <div className="brand-mark">AR</div>
         <div className="brand-copy"><strong>AR4 Studio</strong><span>MK5 digital twin</span></div>
-        <div className="connection"><i /> Simulation online</div>
         <div className="command-output">
           <output aria-live="polite" title={commandOutput}>{commandOutput}</output>
           {commandOutput && (
@@ -1415,8 +1001,8 @@ export default function RobotSimulator() {
       </header>
 
       <section
-        className={`workspace${visiblePanelCount === 0 ? ' workspace-solo' : ''}`}
-        style={{ '--visible-panels': visiblePanelCount } as React.CSSProperties}
+        className={`workspace${visiblePanelCount === 0 ? ' workspace-solo' : ''}${stackCartesian ? ' workspace-stack-cartesian' : ''}`}
+        style={{ '--visible-panels': visiblePanelCount, '--visible-columns': visibleColumnCount } as React.CSSProperties}
       >
         <section className="viewport-card">
           <div className="canvas-wrap">
@@ -1457,14 +1043,14 @@ export default function RobotSimulator() {
                 if (file) void loadPlan(file);
                 event.target.value = '';
               }} />
-              <button type="button" title="Load Plan" onClick={() => planFileInputRef.current?.click()}><LoadIcon /><span>Load</span></button>
-              <button type="button" title="Save Plan" onClick={savePlan}><SaveIcon /><span>Save</span></button>
+              <button type="button" title="Load Plan" disabled={running || planExecution !== null} onClick={() => { planLoadRequestRef.current += 1; setPlanFileMessage(null); planFileInputRef.current?.click(); }}><LoadIcon /><span>Load</span></button>
+              <button type="button" title="Save Plan" onClick={() => { void savePlan(); }}><SaveIcon /><span>Save</span></button>
             </div>
           </div>
           <div className="plan-content">
             {planFileMessage && <div className={`plan-file-message ${planFileMessage.type}`} role="status">{planFileMessage.text}</div>}
 
-            {planTargets.length > 0 && <section className="plan-group">
+            {planTargets.length > 0 ? <section className="plan-group">
               <h3>Targets</h3>
               <div className="plan-items">
                 {planTargets.map((target) => <div className="plan-item" key={target.id}>
@@ -1475,6 +1061,9 @@ export default function RobotSimulator() {
                   <button className="row-add-button" type="button" disabled={running || loaded < 18} title={`Add target after ${target.name}`} aria-label={`Add target after ${target.name}`} onClick={() => addTargetAfter(target.id)}><PlusIcon /></button>
                 </div>)}
               </div>
+            </section> : <section className="plan-group">
+              <h3>Targets</h3>
+              <button className="plan-empty-action" type="button" disabled={running || loaded < 18} onClick={() => addTargetAfter(-1)}><PlusIcon />Add target</button>
             </section>}
 
             <section className="plan-group">
@@ -1495,6 +1084,7 @@ export default function RobotSimulator() {
               <div className="plan-filename" title={planFilename ?? undefined}>{planFilename ?? ''}</div>
               {planExecutionMessage && <div className={`plan-execution-message ${planExecutionMessage.type}`} role="status">{planExecutionMessage.text}</div>}
               <div className="plan-items">
+                {planCommands.length === 0 && <button className="plan-empty-action" type="button" disabled={running || planExecution !== null || planTargets.length === 0} onClick={addFirstPlanCommand}><PlusIcon />Add command</button>}
                 {planCommands.map((command, index) => {
                   const startTarget = planTargets.find((candidate) => candidate.id === command.startTargetId);
                   const endTarget = planTargets.find((candidate) => candidate.id === command.endTargetId);
@@ -1521,166 +1111,76 @@ export default function RobotSimulator() {
           </div>
         </aside>}
 
-        {visiblePanels.angles && <aside className="control-panel">
-          <div className="panel-heading"><div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide ANGLES" aria-label="Hide ANGLES column" onClick={() => setPanelVisible('angles', false)}><HiddenIcon /></button><span className="eyebrow">ANGLES</span></div><button className="zero-button" onClick={() => moveTo(PRESETS.Home)}>Zero all</button></div>
-          <div className="joint-list">
-            {JOINTS.map((joint, index) => {
-              const range = jointRanges[index];
-              const progress = ((angles[index] - range.min) / (range.max - range.min)) * 100;
-              return <div className="joint-control" key={joint.name}>
-                <div className="joint-label"><span className="joint-id" style={{ background: joint.accent }}>{joint.name}</span><span><strong>{joint.label}</strong><small>{range.min}° to {range.max}°</small></span><JointAngleInput name={joint.name} value={angles[index]} min={range.min} max={range.max} onChange={(value) => setJoint(index, value)} /></div>
-                <input aria-label={`${joint.name} ${joint.label}`} type="range" min={range.min} max={range.max} step="1" value={angles[index]} onChange={(event) => setJoint(index, Number(event.target.value))} style={{ '--range': `${progress}%`, '--accent': joint.accent } as React.CSSProperties} />
-              </div>;
-            })}
-          </div>
-          <div className="preset-section"><div className="section-label"><span>Saved poses</span><small>Click to move</small></div><div className="preset-grid">
-            {Object.entries(PRESETS).map(([name, pose]) => <button key={name} onClick={() => moveTo(pose)}><span className={`pose-icon pose-${name.toLowerCase()}`} /><strong>{name}</strong><small>{pose.slice(0, 3).join(' · ')}°</small></button>)}
-          </div></div>
-        </aside>}
-
-        {visiblePanels.cartesian && <aside className="ik-panel">
-          <div className="panel-heading">
-            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide CARTESIAN" aria-label="Hide CARTESIAN column" onClick={() => setPanelVisible('cartesian', false)}><HiddenIcon /></button><span className="eyebrow">CARTESIAN</span></div>
-            <button type="button" className="current-pose-button" onClick={fillCurrentPose}>Use current</button>
-          </div>
-          <form className="ik-section" onSubmit={(event) => { event.preventDefault(); solveInverseKinematics(); }}>
-            <div className="ik-grid">
-              {([
-                ['x', 'X', 'mm'], ['y', 'Y', 'mm'], ['z', 'Z', 'mm'],
-                ['rx', 'θx', 'deg'], ['ry', 'θy', 'deg'], ['rz', 'θz', 'deg'],
-              ] as const).map(([key, label, unit]) => <label key={key}>
-                <span>{label}<small>{unit}</small></span>
-                <input
-                  aria-label={`${label} (${unit})`}
-                  type="number"
-                  step="0.1"
-                  value={ikTarget[key]}
-                  onChange={(event) => {
-                    setIkTarget((current) => ({ ...current, [key]: event.target.value }));
-                    setIkMessage(null);
-                  }}
-                />
-              </label>)}
-            </div>
-            <button className="solve-button" type="submit" disabled={loaded < 18 || running}>Calculate &amp; move</button>
-            {ikMessage && <p className={`ik-message ${ikMessage.type}`} role="status" aria-live="polite">{ikMessage.text}</p>}
-          </form>
-        </aside>}
+        {visiblePanels.angles && <AnglesPanel angles={angles} jointRanges={jointRanges} onHide={() => setPanelVisible('angles', false)} onJointChange={setJoint} onMove={moveTo} />}
+        {visiblePanels.cartesian && <CartesianPanel
+          target={ikTarget}
+          message={ikMessage}
+          disabled={loaded < 18 || running}
+          onHide={() => setPanelVisible('cartesian', false)}
+          onUseCurrent={fillCurrentPose}
+          onTargetChange={(updater) => {
+            setIkTarget(updater);
+            setIkMessage(null);
+          }}
+          onSubmit={solveInverseKinematics}
+        />}
       </section>
 
-      {targetDraft && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTargetDraft(null); }}>
-        <form className="plan-dialog" role="dialog" aria-modal="true" aria-labelledby="target-dialog-title" onSubmit={(event) => {
-          event.preventDefault();
-          const saved = { ...targetDraft, name: targetDraft.name.trim() || `Target${targetDraft.id}` };
+      {targetDraft && <TargetDialog
+        draft={targetDraft}
+        onChange={setTargetDraft}
+        onClose={() => setTargetDraft(null)}
+        onSave={(saved) => {
           setPlanTargets((current) => current.map((target) => target.id === saved.id ? saved : target));
           setTargetDraft(null);
-        }}>
-          <header className="settings-header"><h2 id="target-dialog-title">Edit Target</h2><button className="modal-close" type="button" aria-label="Close target editor" onClick={() => setTargetDraft(null)}>×</button></header>
-          <div className="plan-dialog-body">
-            <label className="plan-dialog-name"><span>Name</span><input aria-label="Target name" value={targetDraft.name} onChange={(event) => setTargetDraft({ ...targetDraft, name: event.target.value })} /></label>
-            <div className="plan-dialog-grid">
-              {([['x', 'X', 'mm'], ['y', 'Y', 'mm'], ['z', 'Z', 'mm'], ['rx', 'θX', 'deg'], ['ry', 'θY', 'deg'], ['rz', 'θZ', 'deg']] as const).map(([key, label, unit]) => <label key={key}><span>{label}<small>{unit}</small></span><input aria-label={`Target ${label}`} type="number" step="0.1" value={targetDraft.pose[key]} onChange={(event) => setTargetDraft({ ...targetDraft, pose: { ...targetDraft.pose, [key]: Number(event.target.value) } })} /></label>)}
-            </div>
-            <div className="dialog-actions"><button type="button" onClick={() => setTargetDraft(null)}>Cancel</button><button className="primary" type="submit">Save Target</button></div>
-          </div>
-        </form>
-      </div>}
+        }}
+      />}
 
-      {commandDraft && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandDraft(null); }}>
-        <form className="plan-dialog command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-dialog-title" onSubmit={(event) => {
-          event.preventDefault();
+      {commandDraft && <CommandDialog
+        draft={commandDraft}
+        targets={planTargets}
+        onChange={setCommandDraft}
+        onClose={() => setCommandDraft(null)}
+        onSave={(saved) => {
           setPlanCommands((current) => chainPlanCommands(
-            current.some((command) => command.id === commandDraft.id)
-              ? current.map((command) => command.id === commandDraft.id ? commandDraft : command)
-              : [...current, commandDraft],
+            current.some((command) => command.id === saved.id)
+              ? current.map((command) => command.id === saved.id ? saved : command)
+              : [...current, saved],
             planTargets[0]?.id,
           ));
           setCommandDraft(null);
-        }}>
-          <header className="settings-header"><h2 id="command-dialog-title">Edit Command</h2><button className="modal-close" type="button" aria-label="Close command editor" onClick={() => setCommandDraft(null)}>×</button></header>
-          <div className="plan-dialog-body">
-            <div className="command-dialog-grid">
-              <label><span>Start Target</span><input aria-label="Start target" value={commandDraft.startTargetId === null ? 'Current position' : planTargets.find((target) => target.id === commandDraft.startTargetId)?.name ?? 'Missing'} disabled /></label>
-              <label><span>End Target</span><select aria-label="End target" value={commandDraft.endTargetId} onChange={(event) => setCommandDraft({ ...commandDraft, endTargetId: Number(event.target.value) })}>{planTargets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
-              <label><span>Command</span><select aria-label="Command type" value={commandDraft.type} onChange={(event) => setCommandDraft({ ...commandDraft, type: event.target.value as PlanCommand['type'] })}><option value="move_j">move_j</option><option value="move_l">move_l</option></select></label>
-              {([['speed', 'Speed'], ['acceleration', 'Acceleration'], ['deceleration', 'Deceleration']] as const).map(([key, label]) => <label key={key}><span>{label}<small>%</small></span><input aria-label={label} type="number" min="1" max="100" step="1" value={commandDraft[key]} onChange={(event) => setCommandDraft({ ...commandDraft, [key]: Math.min(100, Math.max(1, Number(event.target.value))) })} /></label>)}
-            </div>
-            <div className="dialog-actions"><button type="button" onClick={() => setCommandDraft(null)}>Cancel</button><button className="primary" type="submit">Save Command</button></div>
-          </div>
-        </form>
-      </div>}
+        }}
+      />}
 
-      {settingsOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
-        <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <header className="settings-header">
-            <div><span className="eyebrow">AR4 STUDIO</span><h2 id="settings-title">Settings</h2></div>
-            <button className="modal-close" type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button>
-          </header>
-          <div className="settings-layout">
-            <nav className="settings-nav" aria-label="Settings categories">
-              <button className={settingsCategory === 'com' ? 'active' : ''} onClick={() => setSettingsCategory('com')}><span>COM</span><small>Serial connection</small></button>
-              <button className={settingsCategory === 'ranges' ? 'active' : ''} onClick={() => setSettingsCategory('ranges')}><span>Joint ranges</span><small>Motion limits</small></button>
-              <button className={settingsCategory === 'motors' ? 'active' : ''} onClick={() => setSettingsCategory('motors')}><span>Motors</span><small>Speed profile</small></button>
-            </nav>
-            <div className="settings-content">
-              {settingsCategory === 'com' && <div className="settings-page">
-                <div className="settings-page-title"><div><h3>COM Ports</h3><p>Select serial ports.</p></div></div>
-                <div className="serial-port-list">
-                  <div className="setting-field serial-field">
-                    <span>Robot COM port</span>
-                    <div className="serial-select-wrap">
-                      <button className="serial-add-button" type="button" title="Add Auxiliary COM port" aria-label="Add Auxiliary COM port" onClick={addAuxiliarySerialPort}><PlusIcon /></button>
-                      <button type="button" className="serial-select" onClick={() => { void requestSerialPort(); }}><strong>{serialPortName}</strong><i aria-hidden="true">⌄</i></button>
-                    </div>
-                  </div>
-                  {auxiliarySerialPortNames.map((portName, index) => <div className="setting-field serial-field" key={index}>
-                    <span>Auxiliary COM port {index + 1}</span>
-                    <div className="serial-select-wrap">
-                      <button className="serial-delete-button" type="button" title={`Delete Auxiliary COM port ${index + 1}`} aria-label={`Delete Auxiliary COM port ${index + 1}`} onClick={() => deleteAuxiliarySerialPort(index)}><DeleteIcon /></button>
-                      <button className="serial-add-button" type="button" title={`Add Auxiliary COM port ${auxiliarySerialPortNames.length + 1}`} aria-label={`Add Auxiliary COM port ${auxiliarySerialPortNames.length + 1}`} onClick={addAuxiliarySerialPort}><PlusIcon /></button>
-                      <button type="button" className="serial-select" onClick={() => { void requestSerialPort(index); }}><strong>{portName}</strong><i aria-hidden="true">⌄</i></button>
-                    </div>
-                  </div>)}
-                </div>
-                {serialMessage && <p className="settings-note" role="status">{serialMessage}</p>}
-              </div>}
-
-              {settingsCategory === 'ranges' && <div className="settings-page">
-                <div className="settings-page-title"><div><h3>Joint ranges</h3><p>Set the permitted angular travel for each joint.</p></div><button className="default-button" type="button" onClick={resetJointRanges}>Default</button></div>
-                <div className="settings-table range-table">
-                  <div className="settings-table-head"><span>Joint</span><span>Minimum</span><span>Maximum</span></div>
-                  {JOINTS.map((joint, index) => <div className="settings-table-row" key={joint.name}>
-                    <strong><i style={{ background: joint.accent }} />{joint.name}</strong>
-                    <label><input aria-label={`${joint.name} minimum range`} type="number" step="0.1" max={jointRanges[index].max} value={jointRanges[index].min} onChange={(event) => updateJointRange(index, 'min', Number(event.target.value))} /><small>deg</small></label>
-                    <label><input aria-label={`${joint.name} maximum range`} type="number" step="0.1" min={jointRanges[index].min} value={jointRanges[index].max} onChange={(event) => updateJointRange(index, 'max', Number(event.target.value))} /><small>deg</small></label>
-                  </div>)}
-                </div>
-              </div>}
-
-              {settingsCategory === 'motors' && <div className="settings-page">
-                <div className="settings-page-title"><div><h3>Motors</h3><p>Configure joint speed limits and the default motion profile.</p></div><button className="default-button" type="button" onClick={resetMotorSettings}>Default</button></div>
-                <div className="settings-table motor-table">
-                  <div className="settings-table-head"><span>Motor</span><span>Maximum speed</span></div>
-                  {JOINTS.map((joint, index) => <div className="settings-table-row" key={joint.name}>
-                    <strong><i style={{ background: joint.accent }} />{joint.name}</strong>
-                    <label><input aria-label={`${joint.name} maximum speed`} type="number" min="0" max={DEFAULT_MOTOR_SPEEDS[index]} step="0.001" value={motorSpeeds[index]} onChange={(event) => updateMotorSpeed(index, Number(event.target.value))} /><small>deg/s</small></label>
-                  </div>)}
-                </div>
-                <div className="profile-settings">
-                  {([
-                    ['Speed Percentage %', speedPercent, setSpeedPercent, 15],
-                    ['Acceleration Percentage %', accelerationPercent, setAccelerationPercent, 10],
-                    ['Deceleration Percentage %', decelerationPercent, setDecelerationPercent, 10],
-                  ] as const).map(([label, value, setter, defaultValue]) => <label className="profile-row" key={label}>
-                    <span><strong>{label}</strong><small>Default {defaultValue}% · Maximum 100%</small></span>
-                    <span className="percent-input"><input type="number" min="0" max="100" step="1" value={value} onChange={(event) => setter(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /><small>%</small></span>
-                  </label>)}
-                </div>
-              </div>}
-            </div>
-          </div>
-        </section>
-      </div>}
+      {settingsOpen && <SettingsModal
+        category={settingsCategory}
+        jointRanges={jointRanges}
+        motorSpeeds={motorSpeeds}
+        speedPercent={speedPercent}
+        accelerationPercent={accelerationPercent}
+        decelerationPercent={decelerationPercent}
+        serialPortName={serialPortName}
+        auxiliarySerialPortNames={auxiliarySerialPortNames}
+        serialMessage={serialMessage}
+        settingsFilename={settingsFilename}
+        settingsFileMessage={settingsFileMessage}
+        loadDisabled={running || planExecution !== null}
+        onCategoryChange={setSettingsCategory}
+        onClose={() => setSettingsOpen(false)}
+        onAddAuxiliaryPort={addAuxiliarySerialPort}
+        onDeleteAuxiliaryPort={deleteAuxiliarySerialPort}
+        onRequestSerialPort={requestSerialPort}
+        onJointRangeChange={updateJointRange}
+        onMotorSpeedChange={updateMotorSpeed}
+        onResetJointRanges={resetJointRanges}
+        onResetMotorSettings={resetMotorSettings}
+        onSpeedChange={setSpeedPercent}
+        onAccelerationChange={setAccelerationPercent}
+        onDecelerationChange={setDecelerationPercent}
+        onSaveSettings={() => { void saveSettings(); }}
+        onBeginLoad={() => { settingsLoadRequestRef.current += 1; setSettingsFileMessage(null); }}
+        onLoadSettings={loadSettings}
+      />}
     </main>
   );
 }

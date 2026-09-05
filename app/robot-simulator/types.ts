@@ -1,0 +1,19 @@
+import type { createPositionResponse, HELLO_RESPONSE } from '../simulator-protocol';
+
+export type Pose = [number, number, number, number, number, number];
+export type TcpPose = { x: number; y: number; z: number; rx: number; ry: number; rz: number };
+export type IkTarget = Record<keyof TcpPose, string>;
+export type SettingsCategory = 'com' | 'ranges' | 'motors';
+export type JointRange = { min: number; max: number };
+export type SerialPortLike = { getInfo: () => { usbVendorId?: number; usbProductId?: number } };
+export type MoveJointsCommand = { cmd: 'move_joints'; j: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number };
+export type MoveJCommand = { cmd: 'move_j'; pose: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
+export type MoveLCommand = { cmd: 'move_l'; pose: number[]; ext?: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; rounding?: number; w?: string };
+export type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
+export type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
+export type PanelKey = 'plan' | 'angles' | 'cartesian';
+export type PlanTarget = { id: number; name: string; pose: TcpPose; visible: boolean };
+export type PlanCommand = { id: number; type: 'move_j' | 'move_l'; startTargetId: number | null; endTargetId: number; speed: number; acceleration: number; deceleration: number };
+export type StatusMessage = { type: 'success' | 'error' | 'info'; text: string };
+export type RobotPositionResponse = ReturnType<typeof createPositionResponse>;
+export type CommandResponse = typeof HELLO_RESPONSE | RobotPositionResponse | { msg: 'error'; data: string };
