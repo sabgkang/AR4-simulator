@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 
-export function JointAngleInput({ name, value, min, max, onChange }: {
+export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
   name: string;
   value: number;
   min: number;
   max: number;
+  disabled: boolean;
   onChange: (value: number) => void;
 }) {
   const formatAngle = (angle: number) => String(Math.round(angle * 100) / 100);
@@ -16,6 +17,10 @@ export function JointAngleInput({ name, value, min, max, onChange }: {
   }, [value]);
 
   const commit = () => {
+    if (disabled) {
+      setDraft(formatAngle(value));
+      return;
+    }
     const parsed = Number(draft);
     const next = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value;
     onChange(next);
@@ -30,6 +35,7 @@ export function JointAngleInput({ name, value, min, max, onChange }: {
       min={min}
       max={max}
       step="0.01"
+      disabled={disabled}
       value={draft}
       onFocus={() => { focused.current = true; }}
       onChange={(event) => {

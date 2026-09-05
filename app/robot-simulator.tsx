@@ -7,14 +7,16 @@ import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, t
 import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
 import { AnglesPanel, CartesianPanel } from './robot-simulator/control-panels';
 import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS, TOOL_TIP_OFFSET } from './robot-simulator/config';
+import { DevicePanel } from './robot-simulator/device-panel';
 import { saveJsonFile } from './robot-simulator/file-io';
 import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
 import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
 import { chainPlanCommands, createPlanFilename, parsePlan, serializePlan } from './robot-simulator/plan';
 import { CommandDialog, TargetDialog } from './robot-simulator/plan-dialogs';
+import { DEFAULT_PANEL_VISIBILITY, updatePanelVisibility } from './robot-simulator/panel-layout';
 import { createSettingsFilename, parseSettings, serializeSettings, type SimulatorSettings } from './robot-simulator/settings-file';
 import { SettingsModal } from './robot-simulator/settings-modal';
-import type { CommandResponse, IkTarget, JointRange, MotionCommand, PanelKey, PlanCommand, PlanTarget, Pose, SerialPortLike, SettingsCategory, StatusMessage, TcpPose, TestCommandName } from './robot-simulator/types';
+import type { CommandResponse, IkTarget, JointRange, MotionCommand, PanelKey, PanelVisibility, PlanCommand, PlanTarget, Pose, SerialPortLike, SettingsCategory, StatusMessage, TcpPose, TestCommandName } from './robot-simulator/types';
 import { useRobotScene } from './robot-simulator/use-robot-scene';
 
 declare global {
@@ -40,6 +42,8 @@ export default function RobotSimulator() {
   const ikInitialized = useRef(false);
   const [angles, setAngles] = useState<Pose>(PRESETS.Home);
   const [tcp, setTcp] = useState<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
+  const [deviceAngles] = useState<Pose>(PRESETS.Home);
+  const [deviceTcp] = useState<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
   const [ikTarget, setIkTarget] = useState<IkTarget>({ x: '', y: '', z: '', rx: '', ry: '', rz: '' });
   const [ikMessage, setIkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [loaded, setLoaded] = useState(0);
@@ -58,7 +62,7 @@ export default function RobotSimulator() {
   const [serialMessage, setSerialMessage] = useState<string | null>(null);
   const [settingsFilename, setSettingsFilename] = useState('Default settings');
   const [settingsFileMessage, setSettingsFileMessage] = useState<StatusMessage | null>(null);
-  const [visiblePanels, setVisiblePanels] = useState<Record<PanelKey, boolean>>({ plan: true, angles: true, cartesian: true });
+  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>(() => ({ ...DEFAULT_PANEL_VISIBILITY }));
   const [planTargets, setPlanTargets] = useState<PlanTarget[]>([]);
   const [planCommands, setPlanCommands] = useState<PlanCommand[]>([]);
   const [commandInsertAfterId, setCommandInsertAfterId] = useState<number | null>(null);
@@ -132,11 +136,20 @@ export default function RobotSimulator() {
   };
 
   const setPanelVisible = (panel: PanelKey, visible: boolean) => {
-    setVisiblePanels((current) => ({ ...current, [panel]: visible }));
+    setVisiblePanels((current) => updatePanelVisibility(current, panel, visible));
   };
   const visiblePanelCount = Object.values(visiblePanels).filter(Boolean).length;
   const stackCartesian = visiblePanels.angles && visiblePanels.cartesian;
   const visibleColumnCount = visiblePanelCount - (stackCartesian ? 1 : 0);
+  const deviceMode = visiblePanels.device;
+  const cartesianDisplayTarget: IkTarget = deviceMode ? {
+    x: deviceTcp.x.toFixed(1),
+    y: deviceTcp.y.toFixed(1),
+    z: deviceTcp.z.toFixed(1),
+    rx: deviceTcp.rx.toFixed(1),
+    ry: deviceTcp.ry.toFixed(1),
+    rz: deviceTcp.rz.toFixed(1),
+  } : ikTarget;
   const addTargetAfter = (afterId: number) => {
     const id = nextTargetIdRef.current++;
     const target = { id, name: `Target${id}`, pose: { ...tcpRef.current }, visible: true };
@@ -1007,8 +1020,9 @@ export default function RobotSimulator() {
         <section className="viewport-card">
           <div className="canvas-wrap">
             <canvas ref={canvasRef} aria-label="Interactive 3D model of the AR4 MK5 robot" />
-            {visiblePanelCount < 3 && <div className="panel-reopeners" aria-label="Show hidden panels">
+            {Object.values(visiblePanels).some((visible) => !visible) && <div className="panel-reopeners" aria-label="Show hidden panels">
               {!visiblePanels.plan && <button type="button" onClick={() => setPanelVisible('plan', true)}><ViewIcon />PLAN</button>}
+              {!visiblePanels.device && <button type="button" onClick={() => setPanelVisible('device', true)}><ViewIcon />DEVICE</button>}
               {!visiblePanels.angles && <button type="button" onClick={() => setPanelVisible('angles', true)}><ViewIcon />ANGLES</button>}
               {!visiblePanels.cartesian && <button type="button" onClick={() => setPanelVisible('cartesian', true)}><ViewIcon />CARTESIAN</button>}
             </div>}
@@ -1111,11 +1125,14 @@ export default function RobotSimulator() {
           </div>
         </aside>}
 
-        {visiblePanels.angles && <AnglesPanel angles={angles} jointRanges={jointRanges} onHide={() => setPanelVisible('angles', false)} onJointChange={setJoint} onMove={moveTo} />}
+        {visiblePanels.device && <DevicePanel onHide={() => setPanelVisible('device', false)} />}
+
+        {visiblePanels.angles && <AnglesPanel angles={deviceMode ? deviceAngles : angles} jointRanges={jointRanges} displayOnly={deviceMode} onHide={() => setPanelVisible('angles', false)} onJointChange={setJoint} onMove={moveTo} />}
         {visiblePanels.cartesian && <CartesianPanel
-          target={ikTarget}
-          message={ikMessage}
+          target={cartesianDisplayTarget}
+          message={deviceMode ? null : ikMessage}
           disabled={loaded < 18 || running}
+          displayOnly={deviceMode}
           onHide={() => setPanelVisible('cartesian', false)}
           onUseCurrent={fillCurrentPose}
           onTargetChange={(updater) => {

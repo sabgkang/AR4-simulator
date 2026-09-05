@@ -13,6 +13,8 @@ API. Supporting modules are grouped by responsibility:
 - `control-panels.tsx`: joint-angle and Cartesian controls.
 - `plan-dialogs.tsx`: target and command editors.
 - `settings-modal.tsx`: serial, joint-range, and motor settings UI.
+- `device-panel.tsx`: read-only device mode panel reserved for serial command data.
+- `panel-layout.ts`: panel defaults and PLAN/DEVICE exclusivity rules.
 - `icons.tsx` and `joint-angle-input.tsx`: small reusable presentation components.
 
 Keep domain rules in pure `.ts` modules where possible. Components should receive
