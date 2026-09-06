@@ -2,6 +2,7 @@ import type { CSSProperties, Dispatch, SetStateAction } from 'react';
 import { JOINTS, PRESETS } from './config';
 import { HiddenIcon } from './icons';
 import { JointAngleInput } from './joint-angle-input';
+import { formatDisplayNumber } from './number-format';
 import type { IkTarget, JointRange, Pose, StatusMessage } from './types';
 
 export function AnglesPanel({ angles, jointRanges, displayOnly, onHide, onJointChange, onMove }: {
@@ -46,7 +47,20 @@ export function CartesianPanel({ target, message, disabled, displayOnly, onHide,
       <div className="ik-grid">
         {([['x', 'X', 'mm'], ['y', 'Y', 'mm'], ['z', 'Z', 'mm'], ['rx', 'θx', 'deg'], ['ry', 'θy', 'deg'], ['rz', 'θz', 'deg']] as const).map(([key, label, unit]) => <label key={key}>
           <span>{label}<small>{unit}</small></span>
-          <input aria-label={`${label} (${unit})`} type="number" step="0.1" value={target[key]} disabled={displayOnly} onChange={(event) => onTargetChange((current) => ({ ...current, [key]: event.target.value }))} />
+          <input
+            aria-label={`${label} (${unit})`}
+            type="number"
+            step="0.01"
+            value={target[key]}
+            disabled={displayOnly}
+            onChange={(event) => onTargetChange((current) => ({ ...current, [key]: event.target.value }))}
+            onBlur={(event) => {
+              const parsed = Number(event.currentTarget.value);
+              if (event.currentTarget.value !== '' && Number.isFinite(parsed)) {
+                onTargetChange((current) => ({ ...current, [key]: formatDisplayNumber(parsed) }));
+              }
+            }}
+          />
         </label>)}
       </div>
       <button className="solve-button" type="submit" disabled={disabled || displayOnly}>Calculate &amp; move</button>

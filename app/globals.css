@@ -103,6 +103,7 @@ h2 { font-size:19px; }
 .plan-export-menu { position:absolute; top:36px; right:0; z-index:12; width:120px; padding:5px; border:1px solid #d7dce4; border-radius:9px; background:#fff; box-shadow:0 12px 28px rgba(15,23,42,.16); }
 .plan-export-menu button { width:100%; padding:8px 9px; border:0; border-radius:6px; background:transparent; color:#344054; text-align:left; font-size:13px; }
 .plan-export-menu button:hover { background:#eef3ff; color:var(--blue); }
+.plan-export-menu button:disabled { cursor:not-allowed; opacity:.48; }
 .plan-filename { width:100%; min-height:16px; margin-bottom:9px; overflow:hidden; color:#667085; font-size:12px; font-weight:800; letter-spacing:.1em; text-overflow:ellipsis; white-space:nowrap; }
 .plan-execution-message { margin-bottom:9px; padding:7px 9px; border-radius:7px; font-size:12px; }
 .plan-execution-message.success { background:#eaf8f1; color:#087553; }

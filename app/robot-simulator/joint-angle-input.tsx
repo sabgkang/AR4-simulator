@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { formatDisplayNumber } from './number-format';
 
 export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
   name: string;
@@ -8,7 +9,7 @@ export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
   disabled: boolean;
   onChange: (value: number) => void;
 }) {
-  const formatAngle = (angle: number) => String(Math.round(angle * 100) / 100);
+  const formatAngle = (angle: number) => formatDisplayNumber(angle);
   const [draft, setDraft] = useState(formatAngle(value));
   const focused = useRef(false);
 

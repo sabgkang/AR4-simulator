@@ -20,6 +20,17 @@ test('plan serialization round-trips valid data', () => {
   assert.deepEqual(parsePlan(JSON.parse(serializePlan(targets, commands))), { targets, commands });
 });
 
+test('plan serialization preserves full numeric precision', () => {
+  const preciseTargets = [{
+    ...targets[0],
+    pose: { ...targets[0].pose, x: -9.369718875422568e-14, y: 12.3456789012345 },
+  }];
+  const serialized = JSON.parse(serializePlan(preciseTargets, [])) as { targets: typeof preciseTargets };
+
+  assert.equal(serialized.targets[0].pose.x, -9.369718875422568e-14);
+  assert.equal(serialized.targets[0].pose.y, 12.3456789012345);
+});
+
 test('parsePlan rejects dangling target references', () => {
   assert.throws(() => parsePlan({ version: 1, targets, commands: [{ id: 1, type: 'move_j', startTargetId: null, endTargetId: 99, speed: 10, acceleration: 10, deceleration: 10 }] }), /invalid targets or commands/);
 });

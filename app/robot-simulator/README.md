@@ -7,8 +7,10 @@ API. Supporting modules are grouped by responsibility:
 - `config.ts`: robot geometry, joint limits, mesh names, and preset poses.
 - `types.ts`: shared simulator, plan, motion-command, and UI types.
 - `kinematics.ts`: reusable Three.js frame and numeric helpers.
+- `number-format.ts`: consistent fixed-precision UI number formatting.
 - `use-robot-scene.ts`: Three.js scene creation, STL loading, target markers, and cleanup.
 - `plan.ts`: plan chaining, validation, and serialization.
+- `command-export.ts`: serial command export and command filenames.
 - `settings-file.ts`: versioned settings validation, serialization, and filenames.
 - `control-panels.tsx`: joint-angle and Cartesian controls.
 - `plan-dialogs.tsx`: target and command editors.

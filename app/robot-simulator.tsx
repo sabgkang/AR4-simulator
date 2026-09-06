@@ -6,11 +6,13 @@ import { createJointMotion, DEFAULT_MAX_SPEEDS, type JointValues } from './teens
 import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint } from './teensy-linear-motion';
 import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
 import { AnglesPanel, CartesianPanel } from './robot-simulator/control-panels';
+import { createCommandsFilename, serializePlanCommands } from './robot-simulator/command-export';
 import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS, TOOL_TIP_OFFSET } from './robot-simulator/config';
 import { DevicePanel } from './robot-simulator/device-panel';
 import { saveJsonFile } from './robot-simulator/file-io';
 import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
 import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
+import { formatDisplayNumber } from './robot-simulator/number-format';
 import { chainPlanCommands, createPlanFilename, parsePlan, serializePlan } from './robot-simulator/plan';
 import { CommandDialog, TargetDialog } from './robot-simulator/plan-dialogs';
 import { DEFAULT_PANEL_VISIBILITY, updatePanelVisibility } from './robot-simulator/panel-layout';
@@ -143,12 +145,12 @@ export default function RobotSimulator() {
   const visibleColumnCount = visiblePanelCount - (stackCartesian ? 1 : 0);
   const deviceMode = visiblePanels.device;
   const cartesianDisplayTarget: IkTarget = deviceMode ? {
-    x: deviceTcp.x.toFixed(1),
-    y: deviceTcp.y.toFixed(1),
-    z: deviceTcp.z.toFixed(1),
-    rx: deviceTcp.rx.toFixed(1),
-    ry: deviceTcp.ry.toFixed(1),
-    rz: deviceTcp.rz.toFixed(1),
+    x: formatDisplayNumber(deviceTcp.x),
+    y: formatDisplayNumber(deviceTcp.y),
+    z: formatDisplayNumber(deviceTcp.z),
+    rx: formatDisplayNumber(deviceTcp.rx),
+    ry: formatDisplayNumber(deviceTcp.ry),
+    rz: formatDisplayNumber(deviceTcp.rz),
   } : ikTarget;
   const addTargetAfter = (afterId: number) => {
     const id = nextTargetIdRef.current++;
@@ -237,6 +239,21 @@ export default function RobotSimulator() {
     }
   };
 
+  const exportPlanCommands = async () => {
+    setExportMenuOpen(false);
+    setPlanFileMessage(null);
+    try {
+      const result = await saveJsonFile(createCommandsFilename(), serializePlanCommands(planTargets, planCommands));
+      if (result.status === 'saved') {
+        setPlanFileMessage({ type: 'success', text: `Commands saved as ${result.filename}.` });
+      } else if (result.status === 'download-started') {
+        setPlanFileMessage({ type: 'info', text: 'Command download started. Confirm the file in your browser.' });
+      }
+    } catch (error) {
+      setPlanFileMessage({ type: 'error', text: error instanceof Error ? error.message : 'Unable to export commands.' });
+    }
+  };
+
   const loadPlan = async (file: File) => {
     if (runningRef.current || planExecutionRef.current !== null) {
       setPlanFileMessage({ type: 'error', text: 'Stop the current motion before loading a plan.' });
@@ -317,8 +334,8 @@ export default function RobotSimulator() {
 
   const fillCurrentPose = useCallback(() => {
     setIkTarget({
-      x: tcp.x.toFixed(1), y: tcp.y.toFixed(1), z: tcp.z.toFixed(1),
-      rx: tcp.rx.toFixed(1), ry: tcp.ry.toFixed(1), rz: tcp.rz.toFixed(1),
+      x: formatDisplayNumber(tcp.x), y: formatDisplayNumber(tcp.y), z: formatDisplayNumber(tcp.z),
+      rx: formatDisplayNumber(tcp.rx), ry: formatDisplayNumber(tcp.ry), rz: formatDisplayNumber(tcp.rz),
     });
     setIkMessage(null);
   }, [tcp, setIkTarget, setIkMessage]);
@@ -1038,12 +1055,12 @@ export default function RobotSimulator() {
             </div>
           </div>
           <div className="telemetry-strip">
-            <div><span>X</span><strong>{tcp.x.toFixed(1)}</strong><small>mm</small></div>
-            <div><span>Y</span><strong>{tcp.y.toFixed(1)}</strong><small>mm</small></div>
-            <div><span>Z</span><strong>{tcp.z.toFixed(1)}</strong><small>mm</small></div>
-            <div><span>θx</span><strong>{tcp.rx.toFixed(1)}</strong><small>deg</small></div>
-            <div><span>θy</span><strong>{tcp.ry.toFixed(1)}</strong><small>deg</small></div>
-            <div><span>θz</span><strong>{tcp.rz.toFixed(1)}</strong><small>deg</small></div>
+            <div><span>X</span><strong>{formatDisplayNumber(tcp.x)}</strong><small>mm</small></div>
+            <div><span>Y</span><strong>{formatDisplayNumber(tcp.y)}</strong><small>mm</small></div>
+            <div><span>Z</span><strong>{formatDisplayNumber(tcp.z)}</strong><small>mm</small></div>
+            <div><span>θx</span><strong>{formatDisplayNumber(tcp.rx)}</strong><small>deg</small></div>
+            <div><span>θy</span><strong>{formatDisplayNumber(tcp.ry)}</strong><small>deg</small></div>
+            <div><span>θz</span><strong>{formatDisplayNumber(tcp.rz)}</strong><small>deg</small></div>
             <div className="status-cell"><i /><strong>{running ? 'Moving' : 'Holding'}</strong></div>
           </div>
         </section>
@@ -1070,7 +1087,7 @@ export default function RobotSimulator() {
                 {planTargets.map((target) => <div className="plan-item" key={target.id}>
                   <button className={`plan-icon-button${target.visible ? '' : ' muted'}`} type="button" title={target.visible ? `Hide ${target.name}` : `Show ${target.name}`} aria-label={target.visible ? `Hide ${target.name}` : `Show ${target.name}`} onClick={() => toggleTargetVisibility(target.id)}>{target.visible ? <ViewIcon /> : <HiddenIcon />}</button>
                   <button className="plan-icon-button" type="button" title={`Edit ${target.name}`} aria-label={`Edit ${target.name}`} onClick={() => setTargetDraft({ ...target, pose: { ...target.pose } })}><EditIcon /></button>
-                  <div className="plan-item-copy"><button className="target-name-button" type="button" disabled={running || loaded < 18} title={`Move robot to ${target.name}`} onClick={() => moveToPlanTarget(target)}><strong>{target.name}</strong></button><small>{target.pose.x.toFixed(1)}, {target.pose.y.toFixed(1)}, {target.pose.z.toFixed(1)} mm</small></div>
+                  <div className="plan-item-copy"><button className="target-name-button" type="button" disabled={running || loaded < 18} title={`Move robot to ${target.name}`} onClick={() => moveToPlanTarget(target)}><strong>{target.name}</strong></button><small>{formatDisplayNumber(target.pose.x)}, {formatDisplayNumber(target.pose.y)}, {formatDisplayNumber(target.pose.z)} mm</small></div>
                   <button className="plan-icon-button delete" type="button" title={`Delete ${target.name}`} aria-label={`Delete ${target.name}`} onClick={() => deleteTarget(target.id)}><DeleteIcon /></button>
                   <button className="row-add-button" type="button" disabled={running || loaded < 18} title={`Add target after ${target.name}`} aria-label={`Add target after ${target.name}`} onClick={() => addTargetAfter(target.id)}><PlusIcon /></button>
                 </div>)}
@@ -1089,6 +1106,7 @@ export default function RobotSimulator() {
                   <div className="plan-export-wrap">
                     <button className="plan-action-button export" type="button" title="Export plan" aria-expanded={exportMenuOpen} onClick={() => setExportMenuOpen((open) => !open)}><ExportIcon />Export</button>
                     {exportMenuOpen && <div className="plan-export-menu" role="menu">
+                      <button type="button" role="menuitem" disabled={planCommands.length === 0} onClick={() => { void exportPlanCommands(); }}>Commands</button>
                       <button type="button" role="menuitem" onClick={() => setExportMenuOpen(false)}>Python</button>
                       <button type="button" role="menuitem" onClick={() => setExportMenuOpen(false)}>JavaScript</button>
                     </div>}
