@@ -200,6 +200,7 @@ export default function RobotSimulator() {
         speed: speedPercent,
         acceleration: accelerationPercent,
         deceleration: decelerationPercent,
+        ...(pendingCommandType === 'move_joints' ? { joints: [...anglesRef.current, ...externalAxesRef.current] } : {}),
       };
       const next = [...current.slice(0, index + 1), inserted, ...current.slice(index + 1)];
       return chainPlanCommands(next, next[0]?.startTargetId ?? null);
@@ -634,7 +635,12 @@ export default function RobotSimulator() {
       }
       for (const command of planCommands) {
         const endTarget = getPlanTarget(command.endTargetId);
-        await moveToAsync(solvePose(targetPoseArray(endTarget)).joints);
+        if (command.type === 'move_joints') {
+          if (!command.joints || command.joints.length !== 9) throw new Error('move_joints requires nine joint values.');
+          await moveToAsync(command.joints.slice(0, 6) as Pose);
+        } else {
+          await moveToAsync(solvePose(targetPoseArray(endTarget)).joints);
+        }
       }
       setPlanExecutionMessage({ type: 'success', text: 'Preview completed.' });
     } catch (error) {
@@ -660,9 +666,12 @@ export default function RobotSimulator() {
       }
       for (const command of planCommands) {
         const endTarget = getPlanTarget(command.endTargetId);
+        if (command.type === 'move_joints' && (!command.joints || command.joints.length !== 9)) {
+          throw new Error('move_joints requires nine joint values.');
+        }
         const response = await executeCommand({
           cmd: command.type,
-          pose: targetPoseArray(endTarget),
+          ...(command.type === 'move_joints' ? { j: command.joints } : { pose: targetPoseArray(endTarget) }),
           spd_type: 'percent',
           spd: command.speed,
           acc: command.acceleration,
@@ -1128,6 +1137,7 @@ export default function RobotSimulator() {
                     <button className="row-add-button" type="button" disabled={running || planExecution !== null} title={`Add command after ${command.type}`} aria-label={`Add command after ${command.type}`} onClick={() => { setPendingCommandType(null); setCommandInsertAfterId(commandInsertAfterId === command.id ? null : command.id); }}><PlusIcon /></button>
                     {commandInsertAfterId === command.id && <div className="row-add-menu" role="menu">
                       {!pendingCommandType ? <>
+                        <button type="button" role="menuitem" onClick={() => addPlanCommand('move_joints')}>move_joints</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_j')}>move_j</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_l')}>move_l</button>
                       </> : <>
@@ -1174,6 +1184,7 @@ export default function RobotSimulator() {
       {commandDraft && <CommandDialog
         draft={commandDraft}
         targets={planTargets}
+        defaultJoints={[...angles, 0, 0, 0]}
         onChange={setCommandDraft}
         onClose={() => setCommandDraft(null)}
         onSave={(saved) => {

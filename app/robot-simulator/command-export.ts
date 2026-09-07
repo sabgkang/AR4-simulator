@@ -22,6 +22,11 @@ export function serializePlanCommands(targets: PlanTarget[], commands: PlanComma
       dec: roundCommandNumber(command.deceleration),
     } as const;
 
+    if (command.type === 'move_joints') {
+      if (!command.joints || command.joints.length !== 9) throw new Error('move_joints requires nine joint values.');
+      return { cmd: 'move_joints', j: command.joints.map(roundCommandNumber), ...profile };
+    }
+
     if (command.type === 'move_l') {
       return {
         cmd: 'move_l',

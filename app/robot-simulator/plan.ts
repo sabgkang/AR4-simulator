@@ -30,9 +30,12 @@ export function parsePlan(value: unknown) {
   const commands = parsed.commands.filter((command): command is PlanCommand => {
     if (!command || typeof command !== 'object') return false;
     const candidate = command as Partial<PlanCommand>;
-    return Number.isInteger(candidate.id) && (candidate.type === 'move_j' || candidate.type === 'move_l')
+    const hasValidJoints = candidate.type !== 'move_joints'
+      || (Array.isArray(candidate.joints) && candidate.joints.length === 9 && candidate.joints.every((joint) => typeof joint === 'number' && Number.isFinite(joint)));
+    return Number.isInteger(candidate.id) && (candidate.type === 'move_joints' || candidate.type === 'move_j' || candidate.type === 'move_l')
       && (candidate.startTargetId === null || targetIds.has(candidate.startTargetId ?? -1)) && targetIds.has(candidate.endTargetId ?? -1)
-      && [candidate.speed, candidate.acceleration, candidate.deceleration].every((item) => typeof item === 'number' && Number.isFinite(item));
+      && [candidate.speed, candidate.acceleration, candidate.deceleration].every((item) => typeof item === 'number' && Number.isFinite(item))
+      && hasValidJoints;
   });
   if (targets.length !== parsed.targets.length || commands.length !== parsed.commands.length) {
     throw new Error('The plan contains invalid targets or commands.');

@@ -16,8 +16,14 @@ test('chainPlanCommands links each command to the previous destination', () => {
 });
 
 test('plan serialization round-trips valid data', () => {
-  const commands = [{ id: 1, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 }];
+  const commands = [{ id: 1, type: 'move_joints' as const, startTargetId: null, endTargetId: 1, joints: [1, 2, 3, 4, 5, 6, 7, 8, 9], speed: 10, acceleration: 10, deceleration: 10 }];
   assert.deepEqual(parsePlan(JSON.parse(serializePlan(targets, commands))), { targets, commands });
+});
+
+test('parsePlan rejects move_joints without nine finite joint values', () => {
+  const command = { id: 1, type: 'move_joints', startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 };
+  assert.throws(() => parsePlan({ version: 1, targets, commands: [command] }), /invalid targets or commands/);
+  assert.throws(() => parsePlan({ version: 1, targets, commands: [{ ...command, joints: [1, 2, 3] }] }), /invalid targets or commands/);
 });
 
 test('plan serialization preserves full numeric precision', () => {

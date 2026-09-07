@@ -9,12 +9,14 @@ const targets = [
 
 test('PLAN commands export as one serial JSON command per line', () => {
   const content = serializePlanCommands(targets, [
+    { id: 0, type: 'move_joints', startTargetId: null, endTargetId: 1, joints: [10.123, 20, 30, 40, 50, 60, 70, 80, 90], speed: 20, acceleration: 11, deceleration: 12 },
     { id: 1, type: 'move_j', startTargetId: null, endTargetId: 1, speed: 15, acceleration: 10, deceleration: 10 },
     { id: 2, type: 'move_l', startTargetId: 1, endTargetId: 2, speed: 12, acceleration: 10, deceleration: 10 },
   ]);
   const commands = content.trim().split('\n').map((line) => JSON.parse(line) as unknown);
 
   assert.deepEqual(commands, [
+    { cmd: 'move_joints', j: [10.12, 20, 30, 40, 50, 60, 70, 80, 90], spd_type: 'percent', spd: 20, acc: 11, dec: 12 },
     { cmd: 'move_j', pose: [315, 0, 450, 0, 135, 0], spd_type: 'percent', spd: 15, acc: 10, dec: 10, w: 'A' },
     { cmd: 'move_l', pose: [300, 25, 425, 0, 90, 10], ext: [0, 0, 0], spd_type: 'percent', spd: 12, acc: 10, dec: 10, rounding: 0, w: 'A' },
   ]);
