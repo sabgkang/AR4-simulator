@@ -137,6 +137,7 @@ h2 { font-size:19px; }
 .command-kind { padding:5px 7px; border-radius:6px; background:#eaf0ff; color:#2457e6; font-family:var(--font-geist-mono),monospace; font-size:12px; font-weight:800; }
 .command-kind.move_l { background:#e8f7f1; color:#087553; }
 .command-kind.move_joints { background:#fff1db; color:#a45108; }
+.command-kind.loop-begin,.command-kind.loop-end { background:#dcfce7; color:#15803d; }
 .joint-list { padding:6px 20px 12px; }
 .joint-control { display:block; padding:13px 0; border-bottom:1px solid #edf0f4; }
 .joint-label { display:grid; grid-template-columns:34px 1fr auto; align-items:center; gap:10px; }

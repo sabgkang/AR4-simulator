@@ -1,4 +1,5 @@
 import type { PlanCommand, PlanTarget } from './types';
+import { expandPlanCommands } from './plan.ts';
 
 function roundCommandNumber(value: number) {
   const rounded = Number(value.toFixed(2));
@@ -12,7 +13,7 @@ function targetPose(target: PlanTarget) {
 
 export function serializePlanCommands(targets: PlanTarget[], commands: PlanCommand[]) {
   const targetsById = new Map(targets.map((target) => [target.id, target]));
-  const exported = commands.map((command) => {
+  const exported = expandPlanCommands(commands).map((command) => {
     const target = targetsById.get(command.endTargetId);
     if (!target) throw new Error(`Target ${command.endTargetId} was not found.`);
     const profile = {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chainPlanCommands, createPlanFilename, parsePlan, serializePlan } from './robot-simulator/plan.ts';
+import { chainPlanCommands, createPlanFilename, expandPlanCommands, parsePlan, serializePlan } from './robot-simulator/plan.ts';
 
 const targets = [
   { id: 1, name: 'HOME', pose: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 }, visible: true },
@@ -12,7 +12,26 @@ test('chainPlanCommands links each command to the previous destination', () => {
     { id: 1, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 },
     { id: 2, type: 'move_l' as const, startTargetId: null, endTargetId: 2, speed: 20, acceleration: 20, deceleration: 20 },
   ];
-  assert.deepEqual(chainPlanCommands(commands, null).map((command) => command.startTargetId), [null, 1]);
+  assert.deepEqual(chainPlanCommands(commands, null).filter((command) => 'startTargetId' in command).map((command) => command.startTargetId), [null, 1]);
+});
+
+test('expandPlanCommands repeats and nests loop blocks', () => {
+  const first = { id: 1, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 };
+  const second = { ...first, id: 2, endTargetId: 2 };
+  const expanded = expandPlanCommands([
+    { id: 3, type: 'loop-begin', count: 2 },
+    first,
+    { id: 4, type: 'loop-begin', count: 3 },
+    second,
+    { id: 5, type: 'loop-end' },
+    { id: 6, type: 'loop-end' },
+  ]);
+  assert.deepEqual(expanded.map((command) => command.id), [1, 2, 2, 2, 1, 2, 2, 2]);
+});
+
+test('expandPlanCommands rejects unmatched loop markers', () => {
+  assert.throws(() => expandPlanCommands([{ id: 1, type: 'loop-begin', count: 1 }]), /matching loop-end/);
+  assert.throws(() => expandPlanCommands([{ id: 1, type: 'loop-end' }]), /matching loop-begin/);
 });
 
 test('plan serialization round-trips valid data', () => {

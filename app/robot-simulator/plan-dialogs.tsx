@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
-import type { PlanCommand, PlanTarget } from './types';
+import type { PlanCommand, PlanMotionCommand, PlanTarget } from './types';
 
 export function TargetDialog({ draft, onChange, onClose, onSave }: {
   draft: PlanTarget;
@@ -31,6 +31,27 @@ export function CommandDialog({ draft, targets, defaultJoints, onChange, onClose
   onClose: () => void;
   onSave: (command: PlanCommand) => void;
 }) {
+  if (draft.type === 'loop-begin') {
+    return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form className="plan-dialog command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-dialog-title" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
+        <header className="settings-header"><h2 id="command-dialog-title">Loop settings</h2><button className="modal-close" type="button" aria-label="Close loop editor" onClick={onClose}>×</button></header>
+        <div className="plan-dialog-body">
+          <label><span>Loop count</span><input aria-label="Loop count" type="number" min="1" step="1" value={draft.count} onChange={(event) => {
+            if (event.target.value === '') return;
+            const count = Math.trunc(Number(event.target.value));
+            if (count === 0) {
+              window.alert('0 is invalid for the loop count.');
+              return;
+            }
+            onChange({ ...draft, count: Math.max(1, count) });
+          }} /></label>
+          <div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" type="submit">Save Loop</button></div>
+        </div>
+      </form>
+    </div>;
+  }
+  if (draft.type === 'loop-end') return null;
+
   return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <form className="plan-dialog command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-dialog-title" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
       <header className="settings-header"><h2 id="command-dialog-title">Edit Command</h2><button className="modal-close" type="button" aria-label="Close command editor" onClick={onClose}>×</button></header>
@@ -39,7 +60,7 @@ export function CommandDialog({ draft, targets, defaultJoints, onChange, onClose
           <label><span>Start Target</span><input aria-label="Start target" value={draft.startTargetId === null ? 'Current position' : targets.find((target) => target.id === draft.startTargetId)?.name ?? 'Missing'} disabled /></label>
           <label><span>End Target</span><select aria-label="End target" value={draft.endTargetId} onChange={(event) => onChange({ ...draft, endTargetId: Number(event.target.value) })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
           <label><span>Command</span><select aria-label="Command type" value={draft.type} onChange={(event) => {
-            const type = event.target.value as PlanCommand['type'];
+            const type = event.target.value as PlanMotionCommand['type'];
             onChange({ ...draft, type, joints: type === 'move_joints' ? draft.joints ?? [...defaultJoints] : draft.joints });
           }}><option value="move_joints">move_joints</option><option value="move_j">move_j</option><option value="move_l">move_l</option></select></label>
           {([['speed', 'Speed'], ['acceleration', 'Acceleration'], ['deceleration', 'Deceleration']] as const).map(([key, label]) => <label key={key}><span>{label}<small>%</small></span><input aria-label={label} type="number" min="1" max="100" step="1" value={draft[key]} onChange={(event) => onChange({ ...draft, [key]: Math.min(100, Math.max(1, Number(event.target.value))) })} /></label>)}

@@ -13,12 +13,12 @@ import { saveJsonFile } from './robot-simulator/file-io';
 import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
 import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
 import { formatDisplayNumber } from './robot-simulator/number-format';
-import { chainPlanCommands, createPlanFilename, parsePlan, serializePlan } from './robot-simulator/plan';
+import { chainPlanCommands, createPlanFilename, expandPlanCommands, isPlanMotionCommand, parsePlan, serializePlan } from './robot-simulator/plan';
 import { CommandDialog, TargetDialog } from './robot-simulator/plan-dialogs';
 import { DEFAULT_PANEL_VISIBILITY, updatePanelVisibility } from './robot-simulator/panel-layout';
 import { createSettingsFilename, parseSettings, serializeSettings, type SimulatorSettings } from './robot-simulator/settings-file';
 import { SettingsModal } from './robot-simulator/settings-modal';
-import type { CommandResponse, IkTarget, JointRange, MotionCommand, PanelKey, PanelVisibility, PlanCommand, PlanTarget, Pose, SerialPortLike, SettingsCategory, StatusMessage, TcpPose, TestCommandName } from './robot-simulator/types';
+import type { CommandResponse, IkTarget, JointRange, MotionCommand, PanelKey, PanelVisibility, PlanCommand, PlanMotionCommand, PlanTarget, Pose, SerialPortLike, SettingsCategory, StatusMessage, TcpPose, TestCommandName } from './robot-simulator/types';
 import { useRobotScene } from './robot-simulator/use-robot-scene';
 
 declare global {
@@ -68,10 +68,11 @@ export default function RobotSimulator() {
   const [planTargets, setPlanTargets] = useState<PlanTarget[]>([]);
   const [planCommands, setPlanCommands] = useState<PlanCommand[]>([]);
   const [commandInsertAfterId, setCommandInsertAfterId] = useState<number | null>(null);
-  const [pendingCommandType, setPendingCommandType] = useState<PlanCommand['type'] | null>(null);
+  const [pendingCommandType, setPendingCommandType] = useState<PlanMotionCommand['type'] | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [targetDraft, setTargetDraft] = useState<PlanTarget | null>(null);
   const [commandDraft, setCommandDraft] = useState<PlanCommand | null>(null);
+  const [commandDraftInsertAfterId, setCommandDraftInsertAfterId] = useState<number | null>(null);
   const [planFileMessage, setPlanFileMessage] = useState<StatusMessage | null>(null);
   const [planFilename, setPlanFilename] = useState<string | null>(null);
   const [planExecution, setPlanExecution] = useState<'preview' | 'run' | null>(null);
@@ -170,19 +171,19 @@ export default function RobotSimulator() {
     const remainingTargets = planTargets.filter((target) => target.id !== id);
     setPlanTargets(remainingTargets);
     setPlanCommands((current) => chainPlanCommands(
-      current.filter((command) => command.startTargetId !== id && command.endTargetId !== id),
-      current[0]?.startTargetId ?? null,
+      current.filter((command) => !isPlanMotionCommand(command) || (command.startTargetId !== id && command.endTargetId !== id)),
+      current.find(isPlanMotionCommand)?.startTargetId ?? null,
     ));
   };
 
   const deletePlanCommand = (id: number) => {
     setPlanCommands((current) => chainPlanCommands(
       current.filter((command) => command.id !== id),
-      current[0]?.startTargetId ?? null,
+      current.find(isPlanMotionCommand)?.startTargetId ?? null,
     ));
   };
 
-  const addPlanCommand = (type: PlanCommand['type']) => {
+  const addPlanCommand = (type: PlanMotionCommand['type']) => {
     if (commandInsertAfterId === null || planTargets.length < 1) return;
     setPendingCommandType(type);
   };
@@ -192,10 +193,11 @@ export default function RobotSimulator() {
     setPlanCommands((current) => {
       const index = current.findIndex((command) => command.id === commandInsertAfterId);
       if (index < 0) return current;
-      const inserted: PlanCommand = {
+      const previousMotion = current.slice(0, index + 1).reverse().find(isPlanMotionCommand);
+      const inserted: PlanMotionCommand = {
         id: nextCommandIdRef.current++,
         type: pendingCommandType,
-        startTargetId: current[index].endTargetId,
+        startTargetId: previousMotion?.endTargetId ?? null,
         endTargetId,
         speed: speedPercent,
         acceleration: accelerationPercent,
@@ -203,8 +205,25 @@ export default function RobotSimulator() {
         ...(pendingCommandType === 'move_joints' ? { joints: [...anglesRef.current, ...externalAxesRef.current] } : {}),
       };
       const next = [...current.slice(0, index + 1), inserted, ...current.slice(index + 1)];
-      return chainPlanCommands(next, next[0]?.startTargetId ?? null);
+      return chainPlanCommands(next, next.find(isPlanMotionCommand)?.startTargetId ?? null);
     });
+    setPendingCommandType(null);
+    setCommandInsertAfterId(null);
+  };
+
+  const addPlanLoopCommand = (type: 'loop-begin' | 'loop-end') => {
+    if (commandInsertAfterId === null) return;
+    const id = nextCommandIdRef.current++;
+    if (type === 'loop-begin') {
+      setCommandDraft({ id, type, count: 1 });
+      setCommandDraftInsertAfterId(commandInsertAfterId);
+    } else {
+      setPlanCommands((current) => {
+        const index = current.findIndex((command) => command.id === commandInsertAfterId);
+        if (index < 0) return current;
+        return [...current.slice(0, index + 1), { id, type }, ...current.slice(index + 1)];
+      });
+    }
     setPendingCommandType(null);
     setCommandInsertAfterId(null);
   };
@@ -628,12 +647,13 @@ export default function RobotSimulator() {
     setPlanExecution('preview');
     setPlanExecutionMessage(null);
     try {
-      const startTargetId = planCommands[0].startTargetId;
+      const commands = expandPlanCommands(planCommands);
+      const startTargetId = commands[0]?.startTargetId ?? null;
       if (startTargetId !== null) {
         const startTarget = getPlanTarget(startTargetId);
         await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
       }
-      for (const command of planCommands) {
+      for (const command of commands) {
         const endTarget = getPlanTarget(command.endTargetId);
         if (command.type === 'move_joints') {
           if (!command.joints || command.joints.length !== 9) throw new Error('move_joints requires nine joint values.');
@@ -659,12 +679,13 @@ export default function RobotSimulator() {
     try {
       const executeCommand = window.ar4Simulator?.executeCommand;
       if (!executeCommand) throw new Error('The simulator command API is not ready.');
-      const startTargetId = planCommands[0].startTargetId;
+      const commands = expandPlanCommands(planCommands);
+      const startTargetId = commands[0]?.startTargetId ?? null;
       if (startTargetId !== null) {
         const startTarget = getPlanTarget(startTargetId);
         await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
       }
-      for (const command of planCommands) {
+      for (const command of commands) {
         const endTarget = getPlanTarget(command.endTargetId);
         if (command.type === 'move_joints' && (!command.joints || command.joints.length !== 9)) {
           throw new Error('move_joints requires nine joint values.');
@@ -1127,12 +1148,15 @@ export default function RobotSimulator() {
               <div className="plan-items">
                 {planCommands.length === 0 && <button className="plan-empty-action" type="button" disabled={running || planExecution !== null || planTargets.length === 0} onClick={addFirstPlanCommand}><PlusIcon />Add command</button>}
                 {planCommands.map((command, index) => {
-                  const startTarget = planTargets.find((candidate) => candidate.id === command.startTargetId);
-                  const endTarget = planTargets.find((candidate) => candidate.id === command.endTargetId);
+                  const motionCommand = isPlanMotionCommand(command) ? command : null;
+                  const startTarget = motionCommand ? planTargets.find((candidate) => candidate.id === motionCommand.startTargetId) : null;
+                  const endTarget = motionCommand ? planTargets.find((candidate) => candidate.id === motionCommand.endTargetId) : null;
                   return <div className="plan-item command-item" key={command.id}>
-                    <button className="plan-icon-button" type="button" title={`Edit ${command.type} command`} aria-label={`Edit ${command.type} command`} onClick={() => setCommandDraft({ ...command })}><EditIcon /></button>
+                    {command.type === 'loop-end' ? <span /> : <button className="plan-icon-button" type="button" title={`Edit ${command.type} command`} aria-label={`Edit ${command.type} command`} onClick={() => { setCommandDraftInsertAfterId(null); setCommandDraft({ ...command }); }}><EditIcon /></button>}
                     <span className={`command-kind ${command.type}`}>{command.type}</span>
-                    <div className="plan-item-copy"><strong>{index === 0 && command.startTargetId === null ? 'HOMING' : <>{command.startTargetId === null ? 'Current position' : startTarget?.name ?? 'Missing'} → {endTarget?.name ?? 'Missing'}</>}</strong><small>SPD {command.speed}% · ACC {command.acceleration}% · DEC {command.deceleration}%</small></div>
+                    {motionCommand
+                      ? <div className="plan-item-copy"><strong>{index === 0 && motionCommand.startTargetId === null ? 'HOMING' : <>{motionCommand.startTargetId === null ? 'Current position' : startTarget?.name ?? 'Missing'} → {endTarget?.name ?? 'Missing'}</>}</strong><small>SPD {motionCommand.speed}% · ACC {motionCommand.acceleration}% · DEC {motionCommand.deceleration}%</small></div>
+                      : <div className="plan-item-copy"><strong>{command.type === 'loop-begin' ? `Repeat ${command.count}×` : 'End loop'}</strong><small>{command.type === 'loop-begin' ? 'Commands below repeat until loop-end' : 'Return to matching loop-begin'}</small></div>}
                     <button className="plan-icon-button delete" type="button" title={`Delete ${command.type} command`} aria-label={`Delete ${command.type} command`} onClick={() => deletePlanCommand(command.id)}><DeleteIcon /></button>
                     <button className="row-add-button" type="button" disabled={running || planExecution !== null} title={`Add command after ${command.type}`} aria-label={`Add command after ${command.type}`} onClick={() => { setPendingCommandType(null); setCommandInsertAfterId(commandInsertAfterId === command.id ? null : command.id); }}><PlusIcon /></button>
                     {commandInsertAfterId === command.id && <div className="row-add-menu" role="menu">
@@ -1140,9 +1164,11 @@ export default function RobotSimulator() {
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_joints')}>move_joints</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_j')}>move_j</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_l')}>move_l</button>
+                        <button type="button" role="menuitem" onClick={() => addPlanLoopCommand('loop-begin')}>loop-begin</button>
+                        <button type="button" role="menuitem" onClick={() => addPlanLoopCommand('loop-end')}>loop-end</button>
                       </> : <>
                         <small>Select end target</small>
-                        {planTargets.filter((target) => target.id !== command.endTargetId).map((target) => <button type="button" role="menuitem" key={target.id} onClick={() => addPlanCommandToTarget(target.id)}>{target.name}</button>)}
+                        {planTargets.filter((target) => target.id !== motionCommand?.endTargetId).map((target) => <button type="button" role="menuitem" key={target.id} onClick={() => addPlanCommandToTarget(target.id)}>{target.name}</button>)}
                         {planTargets.length < 2 && <small>Add another target first</small>}
                       </>}
                     </div>}
@@ -1186,15 +1212,22 @@ export default function RobotSimulator() {
         targets={planTargets}
         defaultJoints={[...angles, 0, 0, 0]}
         onChange={setCommandDraft}
-        onClose={() => setCommandDraft(null)}
+        onClose={() => { setCommandDraft(null); setCommandDraftInsertAfterId(null); }}
         onSave={(saved) => {
-          setPlanCommands((current) => chainPlanCommands(
-            current.some((command) => command.id === saved.id)
-              ? current.map((command) => command.id === saved.id ? saved : command)
-              : [...current, saved],
-            planTargets[0]?.id,
-          ));
+          setPlanCommands((current) => {
+            let next: PlanCommand[];
+            if (current.some((command) => command.id === saved.id)) {
+              next = current.map((command) => command.id === saved.id ? saved : command);
+            } else if (commandDraftInsertAfterId !== null) {
+              const index = current.findIndex((command) => command.id === commandDraftInsertAfterId);
+              next = index < 0 ? current : [...current.slice(0, index + 1), saved, ...current.slice(index + 1)];
+            } else {
+              next = [...current, saved];
+            }
+            return chainPlanCommands(next, next.find(isPlanMotionCommand)?.startTargetId ?? null);
+          });
           setCommandDraft(null);
+          setCommandDraftInsertAfterId(null);
         }}
       />}
 

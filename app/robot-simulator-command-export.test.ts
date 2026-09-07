@@ -26,6 +26,16 @@ test('command export filename includes local date and time', () => {
   assert.equal(createCommandsFilename(new Date(2026, 8, 6, 8, 7)), 'ar4-mk5-cmds-2026-09-06-08-07.json');
 });
 
+test('command export expands loop blocks', () => {
+  const motion = { id: 2, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 15, acceleration: 10, deceleration: 10 };
+  const content = serializePlanCommands(targets, [
+    { id: 1, type: 'loop-begin', count: 2 },
+    motion,
+    { id: 3, type: 'loop-end' },
+  ]);
+  assert.equal(content.trim().split('\n').length, 2);
+});
+
 test('command export rejects missing targets', () => {
   assert.throws(() => serializePlanCommands([], [
     { id: 1, type: 'move_j', startTargetId: null, endTargetId: 99, speed: 15, acceleration: 10, deceleration: 10 },
