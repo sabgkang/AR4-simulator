@@ -1,5 +1,57 @@
 import type { Dispatch, SetStateAction } from 'react';
+import type { ImportedModelDraft } from './imported-model';
 import type { PlanCommand, PlanMotionCommand, PlanTarget } from './types';
+
+export interface SceneSaveDraft {
+  filename: string;
+  overwriteRequired: boolean;
+  error: string | null;
+}
+
+export function SceneSaveDialog({ draft, onChange, onClose, onSave }: {
+  draft: SceneSaveDraft;
+  onChange: Dispatch<SetStateAction<SceneSaveDraft | null>>;
+  onClose: () => void;
+  onSave: (filename: string, overwrite: boolean) => void;
+}) {
+  return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <form className="plan-dialog scene-save-dialog" role="dialog" aria-modal="true" aria-labelledby="scene-save-dialog-title" onSubmit={(event) => {
+      event.preventDefault();
+      if (draft.filename.trim()) onSave(draft.filename, draft.overwriteRequired);
+    }}>
+      <header className="settings-header"><h2 id="scene-save-dialog-title">Save Scene</h2><button className="modal-close" type="button" aria-label="Close scene save dialog" onClick={onClose}>×</button></header>
+      <div className="plan-dialog-body">
+        <label className="plan-dialog-name"><span>Path</span><input aria-label="Scene path" value="Scenes/" readOnly /></label>
+        <label><span>Filename</span><input aria-label="Scene filename" autoFocus value={draft.filename} onChange={(event) => onChange({ filename: event.target.value, overwriteRequired: false, error: null })} /></label>
+        {draft.error && <div className="scene-save-error" role="alert">{draft.error}</div>}
+        <div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" type="submit" disabled={!draft.filename.trim()}>{draft.overwriteRequired ? 'Replace' : 'Save'}</button></div>
+      </div>
+    </form>
+  </div>;
+}
+
+export function ObjectDialog({ draft, onChange, onClose, onSave }: {
+  draft: ImportedModelDraft;
+  onChange: Dispatch<SetStateAction<ImportedModelDraft | null>>;
+  onClose: () => void;
+  onSave: (model: ImportedModelDraft) => void;
+}) {
+  return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <form className="plan-dialog" role="dialog" aria-modal="true" aria-labelledby="object-dialog-title" onSubmit={(event) => {
+      event.preventDefault();
+      onSave({ ...draft, name: draft.name.trim() || `Object${draft.id}` });
+    }}>
+      <header className="settings-header"><h2 id="object-dialog-title">Edit Object</h2><button className="modal-close" type="button" aria-label="Close object editor" onClick={onClose}>×</button></header>
+      <div className="plan-dialog-body">
+        <label className="plan-dialog-name"><span>Name</span><input aria-label="Object name" value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
+        <div className="plan-dialog-grid">
+          {([['x', 'X', 'mm'], ['y', 'Y', 'mm'], ['z', 'Z', 'mm'], ['rx', 'θX', 'deg'], ['ry', 'θY', 'deg'], ['rz', 'θZ', 'deg']] as const).map(([key, label, unit]) => <label key={key}><span>{label}<small>{unit}</small></span><input aria-label={`Object ${label}`} type="number" step={key.startsWith('r') ? '0.1' : '0.01'} value={draft.transform[key]} onChange={(event) => onChange({ ...draft, transform: { ...draft.transform, [key]: Number(event.target.value) } })} /></label>)}
+        </div>
+        <div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" type="submit">Save Object</button></div>
+      </div>
+    </form>
+  </div>;
+}
 
 export function TargetDialog({ draft, onChange, onClose, onSave }: {
   draft: PlanTarget;

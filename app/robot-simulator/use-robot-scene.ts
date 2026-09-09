@@ -16,7 +16,7 @@ import {
   TOOL_TIP_OFFSET,
 } from './config';
 import { setFrame } from './kinematics';
-import { modelFileExtension, type ImportedModelInfo, type ModelAdjustment, type ModelTransformKey } from './imported-model';
+import { modelFileExtension, type ImportedModelInfo, type ModelAdjustment, type ModelFileFormat, type ModelTransformKey } from './imported-model';
 import type { PlanTarget } from './types';
 
 function materialFor(name: string) {
@@ -111,6 +111,7 @@ export function useRobotScene(
   planTargets: PlanTarget[],
   setLoaded: Dispatch<SetStateAction<number>>,
   onModelAdjustment?: (adjustment: ModelAdjustment | null) => void,
+  onModelSelectionChange?: (id: number | null) => void,
 ) {
   const jointRotors = useRef<THREE.Group[]>([]);
   const axes = useRef<THREE.Vector3[]>([]);
@@ -118,15 +119,35 @@ export function useRobotScene(
   const controlsRef = useRef<OrbitControls | null>(null);
   const targetFramesRef = useRef<THREE.Group | null>(null);
   const importedRootRef = useRef<THREE.Group | null>(null);
+  const importedModelsRef = useRef(new Map<number, THREE.Group>());
+  const nextImportedModelIdRef = useRef(1);
   const activeModelRef = useRef<THREE.Group | null>(null);
   const gizmoRef = useRef<THREE.Group | null>(null);
   const gizmoRotationRootRef = useRef<THREE.Group | null>(null);
   const importedResourcesRef = useRef<Array<THREE.BufferGeometry | THREE.Material>>([]);
   const adjustmentCallbackRef = useRef(onModelAdjustment);
+  const selectionCallbackRef = useRef(onModelSelectionChange);
 
   useEffect(() => {
     adjustmentCallbackRef.current = onModelAdjustment;
   }, [onModelAdjustment]);
+
+  useEffect(() => {
+    selectionCallbackRef.current = onModelSelectionChange;
+  }, [onModelSelectionChange]);
+
+  const selectImportedModel = useCallback((id: number | null) => {
+    const model = id === null ? null : importedModelsRef.current.get(id) ?? null;
+    const gizmo = gizmoRef.current;
+    activeModelRef.current = model;
+    if (gizmo) {
+      gizmo.visible = model !== null && model.visible;
+      if (model) gizmo.position.copy(model.position);
+    }
+    if (model && gizmoRotationRootRef.current) gizmoRotationRootRef.current.quaternion.copy(model.quaternion);
+    adjustmentCallbackRef.current?.(null);
+    selectionCallbackRef.current?.(model ? id : null);
+  }, []);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -281,6 +302,7 @@ export function useRobotScene(
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let drag: { key: ModelTransformKey; startX: number; startY: number; startValue: number; projectedPixels: number } | null = null;
+    let clickStart: { x: number; y: number } | null = null;
     const setPointer = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
@@ -295,7 +317,9 @@ export function useRobotScene(
       return Math.max(12, Math.hypot((end.x - origin.x) * rect.width / 2, (end.y - origin.y) * rect.height / 2));
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (!activeModelRef.current || !gizmo.visible || event.button !== 0) return;
+      if (event.button !== 0) return;
+      clickStart = { x: event.clientX, y: event.clientY };
+      if (!activeModelRef.current || !gizmo.visible) return;
       setPointer(event);
       const hit = raycaster.intersectObjects(handles, false)[0];
       const key = hit?.object.userData.transformKey as ModelTransformKey | undefined;
@@ -334,13 +358,26 @@ export function useRobotScene(
       adjustmentCallbackRef.current?.({ key: drag.key, value, phase: 'dragging', cursorX: event.clientX, cursorY: event.clientY });
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (!drag) return;
-      const completed = drag;
-      drag = null;
-      controls.enabled = true;
-      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-      const model = activeModelRef.current;
-      if (model) adjustmentCallbackRef.current?.({ key: completed.key, value: importedTransform(model)[completed.key], phase: 'editing', cursorX: event.clientX, cursorY: event.clientY });
+      if (drag) {
+        const completed = drag;
+        drag = null;
+        clickStart = null;
+        controls.enabled = true;
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+        const model = activeModelRef.current;
+        if (model) adjustmentCallbackRef.current?.({ key: completed.key, value: importedTransform(model)[completed.key], phase: 'editing', cursorX: event.clientX, cursorY: event.clientY });
+        return;
+      }
+      if (!clickStart || event.type === 'pointercancel') { clickStart = null; return; }
+      const moved = Math.hypot(event.clientX - clickStart.x, event.clientY - clickStart.y);
+      clickStart = null;
+      if (moved > 5) return;
+      setPointer(event);
+      const selectableModels = [...importedModelsRef.current.values()].filter((model) => model.visible);
+      const hit = raycaster.intersectObjects(selectableModels, true)[0]?.object;
+      let candidate: THREE.Object3D | null = hit ?? null;
+      while (candidate && typeof candidate.userData.importedModelId !== 'number') candidate = candidate.parent;
+      selectImportedModel(candidate ? candidate.userData.importedModelId as number : null);
     };
     canvas.addEventListener('pointerdown', onPointerDown, true);
     canvas.addEventListener('pointermove', onPointerMove, true);
@@ -382,13 +419,14 @@ export function useRobotScene(
       targetFramesRef.current = null;
       importedRootRef.current = null;
       activeModelRef.current = null;
+      importedModelsRef.current.clear();
       gizmoRef.current = null;
       gizmoRotationRootRef.current = null;
       disposables.forEach((item) => item.dispose());
       importedResourcesRef.current.forEach((item) => item.dispose());
       importedResourcesRef.current = [];
     };
-  }, [canvasRef, setLoaded]);
+  }, [canvasRef, selectImportedModel, setLoaded]);
 
   useEffect(() => {
     const root = targetFramesRef.current;
@@ -458,7 +496,7 @@ export function useRobotScene(
     };
   }, [planTargets]);
 
-  const importModel = useCallback(async (file: File): Promise<ImportedModelInfo> => {
+  const importModel = useCallback(async (file: File, sourcePath: string): Promise<ImportedModelInfo> => {
     const root = importedRootRef.current;
     const gizmo = gizmoRef.current;
     if (!root || !gizmo) throw new Error('3D view is not ready yet.');
@@ -504,17 +542,24 @@ export function useRobotScene(
       });
     }
 
+    const id = nextImportedModelIdRef.current++;
+    const name = `Object${id}`;
+    model.name = name;
+    model.userData.importedModelId = id;
     root.add(model);
-    activeModelRef.current = model;
-    gizmo.position.set(0, 0, 0);
+    importedModelsRef.current.set(id, model);
     gizmo.scale.setScalar(BASE_AXIS_LENGTH);
-    if (gizmoRotationRootRef.current) {
-      gizmoRotationRootRef.current.quaternion.copy(model.quaternion);
-    }
-    gizmo.visible = true;
-    adjustmentCallbackRef.current?.(null);
-    return { name: file.name, transform: importedTransform(model) };
-  }, []);
+    selectImportedModel(id);
+    return {
+      id,
+      name,
+      filename: file.name,
+      format: extension as ModelFileFormat,
+      sourcePath,
+      visible: true,
+      transform: importedTransform(model),
+    };
+  }, [selectImportedModel]);
 
   const setImportedModelTransform = useCallback((key: ModelTransformKey, value: number) => {
     const model = activeModelRef.current;
@@ -527,5 +572,65 @@ export function useRobotScene(
     adjustmentCallbackRef.current?.(null);
   }, []);
 
-  return { jointRotors, axes, cameraRef, controlsRef, importModel, setImportedModelTransform };
+  const setImportedModelVisible = useCallback((id: number, visible: boolean) => {
+    const model = importedModelsRef.current.get(id);
+    if (!model) return;
+    model.visible = visible;
+    if (!visible && activeModelRef.current === model) selectImportedModel(null);
+  }, [selectImportedModel]);
+
+  const setImportedModelPose = useCallback((id: number, transform: ImportedModelInfo['transform']) => {
+    const model = importedModelsRef.current.get(id);
+    if (!model) return;
+    model.position.set(transform.x / 1000, transform.y / 1000, transform.z / 1000);
+    model.rotation.set(
+      THREE.MathUtils.degToRad(transform.rx),
+      THREE.MathUtils.degToRad(transform.ry),
+      THREE.MathUtils.degToRad(transform.rz),
+      'XYZ',
+    );
+    if (activeModelRef.current === model) {
+      gizmoRef.current?.position.copy(model.position);
+      gizmoRotationRootRef.current?.quaternion.copy(model.quaternion);
+    }
+  }, []);
+
+  const getImportedModelTransform = useCallback((id: number) => {
+    const model = importedModelsRef.current.get(id);
+    return model ? importedTransform(model) : null;
+  }, []);
+
+  const renameImportedModel = useCallback((id: number, name: string) => {
+    const model = importedModelsRef.current.get(id);
+    if (model) model.name = name;
+  }, []);
+
+  const removeImportedModel = useCallback((id: number) => {
+    const model = importedModelsRef.current.get(id);
+    if (!model) return;
+    if (activeModelRef.current === model) selectImportedModel(null);
+    model.removeFromParent();
+    model.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => material.dispose());
+    });
+    importedModelsRef.current.delete(id);
+  }, [selectImportedModel]);
+
+  return {
+    jointRotors,
+    axes,
+    cameraRef,
+    controlsRef,
+    importModel,
+    setImportedModelTransform,
+    selectImportedModel,
+    setImportedModelVisible,
+    setImportedModelPose,
+    getImportedModelTransform,
+    renameImportedModel,
+    removeImportedModel,
+  };
 }

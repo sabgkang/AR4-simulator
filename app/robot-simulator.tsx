@@ -11,11 +11,12 @@ import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS
 import { DevicePanel } from './robot-simulator/device-panel';
 import { saveJsonFile } from './robot-simulator/file-io';
 import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, ImportIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
-import { formatModelAdjustmentValue, isSupportedModelFile, type ModelAdjustment } from './robot-simulator/imported-model';
+import { formatModelAdjustmentValue, formatModelOrientationSummary, formatModelPositionSummary, isSupportedModelFile, type ImportedModelDraft, type ImportedModelInfo, type ModelAdjustment } from './robot-simulator/imported-model';
+import { createImportedSceneFilename, parseImportedScene, saveSceneToProject, sceneModelToFile, serializeImportedScene, uploadModelFile } from './robot-simulator/imported-scene';
 import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
 import { formatDisplayNumber } from './robot-simulator/number-format';
 import { chainPlanCommands, createPlanFilename, expandPlanCommands, isPlanMotionCommand, parsePlan, serializePlan } from './robot-simulator/plan';
-import { CommandDialog, TargetDialog } from './robot-simulator/plan-dialogs';
+import { CommandDialog, ObjectDialog, SceneSaveDialog, TargetDialog, type SceneSaveDraft } from './robot-simulator/plan-dialogs';
 import { DEFAULT_PANEL_VISIBILITY, updatePanelVisibility } from './robot-simulator/panel-layout';
 import { createSettingsFilename, parseSettings, serializeSettings, type SimulatorSettings } from './robot-simulator/settings-file';
 import { SettingsModal } from './robot-simulator/settings-modal';
@@ -35,6 +36,7 @@ export default function RobotSimulator() {
   const nextCommandIdRef = useRef(1);
   const planFileInputRef = useRef<HTMLInputElement>(null);
   const modelFileInputRef = useRef<HTMLInputElement>(null);
+  const sceneFileInputRef = useRef<HTMLInputElement>(null);
   const planLoadRequestRef = useRef(0);
   const settingsLoadRequestRef = useRef(0);
   const homeTargetInitializedRef = useRef(false);
@@ -83,11 +85,36 @@ export default function RobotSimulator() {
   const [modelAdjustment, setModelAdjustment] = useState<ModelAdjustment | null>(null);
   const [modelAdjustmentDraft, setModelAdjustmentDraft] = useState('0');
   const [modelDragActive, setModelDragActive] = useState(false);
+  const [importedModels, setImportedModels] = useState<ImportedModelInfo[]>([]);
+  const [selectedImportedModelId, setSelectedImportedModelId] = useState<number | null>(null);
+  const [editingImportedModel, setEditingImportedModel] = useState<ImportedModelDraft | null>(null);
+  const [sceneSaveDraft, setSceneSaveDraft] = useState<SceneSaveDraft | null>(null);
   const handleModelAdjustment = useCallback((adjustment: ModelAdjustment | null) => {
     setModelAdjustment(adjustment);
-    if (adjustment) setModelAdjustmentDraft(formatModelAdjustmentValue(adjustment.key, adjustment.value));
-  }, []);
-  const { jointRotors, axes, cameraRef, controlsRef, importModel, setImportedModelTransform } = useRobotScene(canvasRef, planTargets, setLoaded, handleModelAdjustment);
+    if (adjustment) {
+      setModelAdjustmentDraft(formatModelAdjustmentValue(adjustment.key, adjustment.value));
+      if (selectedImportedModelId !== null) {
+        setImportedModels((current) => current.map((model) => model.id === selectedImportedModelId
+          ? { ...model, transform: { ...model.transform, [adjustment.key]: adjustment.value } }
+          : model));
+      }
+    }
+  }, [selectedImportedModelId, setImportedModels]);
+  const handleModelSelectionChange = useCallback((id: number | null) => setSelectedImportedModelId(id), []);
+  const {
+    jointRotors,
+    axes,
+    cameraRef,
+    controlsRef,
+    importModel,
+    setImportedModelTransform,
+    selectImportedModel,
+    setImportedModelVisible,
+    setImportedModelPose,
+    getImportedModelTransform,
+    renameImportedModel,
+    removeImportedModel,
+  } = useRobotScene(canvasRef, planTargets, setLoaded, handleModelAdjustment, handleModelSelectionChange);
 
   const loadModelFile = useCallback(async (file: File) => {
     if (!isSupportedModelFile(file)) {
@@ -95,21 +122,103 @@ export default function RobotSimulator() {
       return;
     }
     setModelImportMessage({ type: 'loading', text: `Importing ${file.name}…` });
+    let importedModel: ImportedModelInfo | null = null;
     try {
-      await importModel(file);
-      setModelImportMessage({ type: 'success', text: `${file.name} imported at world origin.` });
+      importedModel = await importModel(file, '');
+      const sourcePath = await uploadModelFile(file);
+      setImportedModels((current) => [...current, { ...importedModel!, sourcePath }]);
+      setModelImportMessage({ type: 'success', text: `${file.name} imported to ${sourcePath}.` });
     } catch (error) {
+      if (importedModel) removeImportedModel(importedModel.id);
       setModelImportMessage({ type: 'error', text: error instanceof Error ? error.message : 'Could not import this model.' });
     }
-  }, [importModel]);
+  }, [importModel, removeImportedModel, setImportedModels]);
+
+  const saveImportedScene = useCallback(async (requestedFilename: string, overwrite: boolean) => {
+    setModelImportMessage(null);
+    if (!requestedFilename.trim()) {
+      setSceneSaveDraft((current) => current ? { ...current, error: 'Scene filename cannot be empty.' } : current);
+      return;
+    }
+    const models = importedModels.map((model) => ({
+      ...model,
+      transform: getImportedModelTransform(model.id) ?? model.transform,
+    }));
+    const content = serializeImportedScene(models);
+    try {
+      const result = await saveSceneToProject(requestedFilename, content, overwrite);
+      setSceneSaveDraft(null);
+      setModelImportMessage({ type: 'success', text: `Scene saved to ${result.path}.` });
+    } catch (error) {
+      const message = (error as Error & { status?: number }).status === 409
+        ? 'This filename already exists. Choose Replace to overwrite it.'
+        : error instanceof Error ? error.message : 'Could not save the scene.';
+      setSceneSaveDraft((current) => current ? { ...current, overwriteRequired: (error as Error & { status?: number }).status === 409, error: message } : current);
+    }
+  }, [getImportedModelTransform, importedModels, setSceneSaveDraft]);
+
+  const loadImportedScene = useCallback(async (file: File) => {
+    setModelImportMessage({ type: 'loading', text: `Loading ${file.name}…` });
+    const loadedModels: ImportedModelInfo[] = [];
+    try {
+      const scene = parseImportedScene(JSON.parse(await file.text()) as unknown);
+      const sourceFiles = await Promise.all(scene.models.map(sceneModelToFile));
+      importedModels.forEach((model) => removeImportedModel(model.id));
+      setImportedModels([]);
+      setEditingImportedModel(null);
+
+      for (let index = 0; index < scene.models.length; index += 1) {
+        const savedModel = scene.models[index];
+        const importedModel = await importModel(sourceFiles[index], savedModel.sourcePath);
+        renameImportedModel(importedModel.id, savedModel.name);
+        setImportedModelPose(importedModel.id, savedModel.transform);
+        setImportedModelVisible(importedModel.id, savedModel.visible);
+        loadedModels.push({ ...importedModel, ...savedModel, transform: { ...savedModel.transform } });
+      }
+
+      setImportedModels(loadedModels);
+      const selectedModel = [...loadedModels].reverse().find((model) => model.visible);
+      selectImportedModel(selectedModel?.id ?? null);
+      setModelImportMessage({ type: 'success', text: `${loadedModels.length} object${loadedModels.length === 1 ? '' : 's'} loaded from ${file.name}.` });
+    } catch (error) {
+      loadedModels.forEach((model) => removeImportedModel(model.id));
+      if (loadedModels.length > 0) setImportedModels([]);
+      setModelImportMessage({ type: 'error', text: error instanceof Error ? error.message : 'Could not load the scene.' });
+    }
+  }, [importModel, importedModels, removeImportedModel, renameImportedModel, selectImportedModel, setEditingImportedModel, setImportedModels, setImportedModelPose, setImportedModelVisible]);
+
+  const selectModelFromList = useCallback((model: ImportedModelInfo) => {
+    if (!model.visible) {
+      setImportedModelVisible(model.id, true);
+      setImportedModels((current) => current.map((candidate) => candidate.id === model.id ? { ...candidate, visible: true } : candidate));
+    }
+    selectImportedModel(model.id);
+  }, [selectImportedModel, setImportedModels, setImportedModelVisible]);
+
+  const toggleImportedModelVisibility = useCallback((model: ImportedModelInfo) => {
+    const visible = !model.visible;
+    setImportedModelVisible(model.id, visible);
+    setImportedModels((current) => current.map((candidate) => candidate.id === model.id ? { ...candidate, visible } : candidate));
+  }, [setImportedModels, setImportedModelVisible]);
+
+  const deleteImportedModel = useCallback((id: number) => {
+    removeImportedModel(id);
+    setImportedModels((current) => current.filter((model) => model.id !== id));
+    setEditingImportedModel((current) => current?.id === id ? null : current);
+  }, [removeImportedModel, setEditingImportedModel, setImportedModels]);
 
   const confirmModelAdjustment = useCallback(() => {
     if (!modelAdjustment) return;
     const value = Number(modelAdjustmentDraft);
     if (!Number.isFinite(value)) return;
     setImportedModelTransform(modelAdjustment.key, value);
+    if (selectedImportedModelId !== null) {
+      setImportedModels((current) => current.map((model) => model.id === selectedImportedModelId
+        ? { ...model, transform: { ...model.transform, [modelAdjustment.key]: value } }
+        : model));
+    }
     setModelAdjustment(null);
-  }, [modelAdjustment, modelAdjustmentDraft, setImportedModelTransform]);
+  }, [modelAdjustment, modelAdjustmentDraft, selectedImportedModelId, setImportedModels, setImportedModelTransform]);
 
   useEffect(() => {
     if (modelAdjustment?.phase !== 'editing') return;
@@ -1180,12 +1289,38 @@ export default function RobotSimulator() {
           <div className="panel-heading">
             <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide IMPORT" aria-label="Hide IMPORT column" onClick={() => setPanelVisible('import', false)}><HiddenIcon /></button><span className="eyebrow">IMPORT</span></div>
             <div className="import-file-actions">
-              <button type="button" title="Import 3D model" onClick={() => modelFileInputRef.current?.click()}><ImportIcon /><span>Import</span></button>
+              <input ref={sceneFileInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void loadImportedScene(file);
+                event.target.value = '';
+              }} />
+              <button type="button" title="Load scene" onClick={() => sceneFileInputRef.current?.click()}><LoadIcon /><span>Load</span></button>
+              <button type="button" title="Save scene" onClick={() => setSceneSaveDraft({ filename: createImportedSceneFilename(), overwriteRequired: false, error: null })}><SaveIcon /><span>Save</span></button>
             </div>
           </div>
           <div className="import-content">
             <p>Import an STL or STEP model, or drag and drop it into the 3D view.</p>
             {modelImportMessage && <div className={`import-panel-message ${modelImportMessage.type}`} role="status">{modelImportMessage.text}</div>}
+            <section className="plan-group import-objects">
+              <h3>Objects</h3>
+              {importedModels.length > 0 ? <div className="plan-items">
+                {importedModels.map((model) => <div className={`plan-item${selectedImportedModelId === model.id ? ' selected' : ''}`} key={model.id}>
+                  <button className={`plan-icon-button${model.visible ? '' : ' muted'}`} type="button" title={model.visible ? `Hide ${model.name}` : `Show ${model.name}`} aria-label={model.visible ? `Hide ${model.name}` : `Show ${model.name}`} onClick={() => toggleImportedModelVisibility(model)}>{model.visible ? <ViewIcon /> : <HiddenIcon />}</button>
+                  <button className="plan-icon-button" type="button" title={`Edit ${model.name}`} aria-label={`Edit ${model.name}`} onClick={() => setEditingImportedModel({ id: model.id, name: model.name, transform: getImportedModelTransform(model.id) ?? { ...model.transform } })}><EditIcon /></button>
+                  <div className="plan-item-copy object-item-copy">
+                    <button className="target-name-button" type="button" title={`Select ${model.name}`} onClick={() => selectModelFromList(model)}><strong>{model.name}</strong></button>
+                    {selectedImportedModelId === model.id
+                      ? <div className="object-transform-lines" title={`${formatModelPositionSummary(model.transform)} · ${formatModelOrientationSummary(model.transform)}`}>
+                        <small>{formatModelPositionSummary(model.transform)}</small>
+                        <small>{formatModelOrientationSummary(model.transform)}</small>
+                      </div>
+                      : <small title={model.filename}>{model.filename}</small>}
+                  </div>
+                  <button className="plan-icon-button delete" type="button" title={`Delete ${model.name}`} aria-label={`Delete ${model.name}`} onClick={() => deleteImportedModel(model.id)}><DeleteIcon /></button>
+                  <button className="row-add-button" type="button" title={`Import another model after ${model.name}`} aria-label={`Import another model after ${model.name}`} onClick={() => modelFileInputRef.current?.click()}><PlusIcon /></button>
+                </div>)}
+              </div> : <button className="plan-empty-action" type="button" onClick={() => modelFileInputRef.current?.click()}><PlusIcon />Add object</button>}
+            </section>
           </div>
         </aside>}
 
@@ -1299,6 +1434,27 @@ export default function RobotSimulator() {
           setPlanTargets((current) => current.map((target) => target.id === saved.id ? saved : target));
           setTargetDraft(null);
         }}
+      />}
+
+      {editingImportedModel && <ObjectDialog
+        draft={editingImportedModel}
+        onChange={setEditingImportedModel}
+        onClose={() => setEditingImportedModel(null)}
+        onSave={(saved) => {
+          renameImportedModel(saved.id, saved.name);
+          setImportedModelPose(saved.id, saved.transform);
+          setImportedModels((current) => current.map((model) => model.id === saved.id
+            ? { ...model, name: saved.name, transform: { ...saved.transform } }
+            : model));
+          setEditingImportedModel(null);
+        }}
+      />}
+
+      {sceneSaveDraft && <SceneSaveDialog
+        draft={sceneSaveDraft}
+        onChange={setSceneSaveDraft}
+        onClose={() => setSceneSaveDraft(null)}
+        onSave={(filename, overwrite) => { void saveImportedScene(filename, overwrite); }}
       />}
 
       {commandDraft && <CommandDialog
