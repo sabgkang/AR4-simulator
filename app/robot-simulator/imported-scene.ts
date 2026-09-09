@@ -1,4 +1,4 @@
-import type { ImportedModelInfo, ModelFileFormat, ModelTransformKey } from './imported-model';
+import { createZeroModelTransform, type ImportedModelInfo, type ModelFileFormat, type ModelTransformKey } from './imported-model.ts';
 
 const TRANSFORM_KEYS: ModelTransformKey[] = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
 const MODEL_FORMATS: ModelFileFormat[] = ['stl', 'step', 'stp'];
@@ -14,6 +14,7 @@ export interface ImportedSceneModel {
 
 export interface ImportedSceneFile {
   version: 1;
+  robotTransform: Record<ModelTransformKey, number>;
   models: ImportedSceneModel[];
 }
 
@@ -28,9 +29,10 @@ export function createImportedSceneFilename(date = new Date()) {
   return `ar4-mk4-scene-${values.map((value) => String(value).padStart(2, '0')).join('-')}.json`;
 }
 
-export function serializeImportedScene(models: ImportedModelInfo[]) {
+export function serializeImportedScene(models: ImportedModelInfo[], robotTransform = createZeroModelTransform()) {
   const scene: ImportedSceneFile = {
     version: 1,
+    robotTransform: { ...robotTransform },
     models: models.map(({ name, filename, format, sourcePath, visible, transform }) => ({
       name,
       filename,
@@ -49,8 +51,20 @@ export function parseImportedScene(value: unknown): ImportedSceneFile {
   if (candidate.version !== 1) throw new Error('Unsupported scene file version.');
   if (!Array.isArray(candidate.models)) throw new Error('Scene file models must be an array.');
 
+  const parseTransform = (transformValue: unknown, label: string) => {
+    if (!transformValue || typeof transformValue !== 'object') throw new Error(`${label} has no transform.`);
+    return Object.fromEntries(TRANSFORM_KEYS.map((key) => {
+      const coordinate = (transformValue as Partial<Record<ModelTransformKey, unknown>>)[key];
+      if (typeof coordinate !== 'number' || !Number.isFinite(coordinate)) throw new Error(`${label} has an invalid ${key} value.`);
+      return [key, coordinate];
+    })) as Record<ModelTransformKey, number>;
+  };
+
   return {
     version: 1,
+    robotTransform: candidate.robotTransform === undefined
+      ? createZeroModelTransform()
+      : parseTransform(candidate.robotTransform, 'Scene robot'),
     models: candidate.models.map((rawModel, index) => {
       if (!rawModel || typeof rawModel !== 'object') throw new Error(`Scene object ${index + 1} is invalid.`);
       const model = rawModel as Partial<ImportedSceneModel>;
@@ -61,14 +75,7 @@ export function parseImportedScene(value: unknown): ImportedSceneFile {
         throw new Error(`Scene object ${index + 1} has an invalid model path.`);
       }
       if (typeof model.visible !== 'boolean') throw new Error(`Scene object ${index + 1} has an invalid visibility value.`);
-      if (!model.transform || typeof model.transform !== 'object') throw new Error(`Scene object ${index + 1} has no transform.`);
-      const transform = Object.fromEntries(TRANSFORM_KEYS.map((key) => {
-        const coordinate = model.transform?.[key];
-        if (typeof coordinate !== 'number' || !Number.isFinite(coordinate)) {
-          throw new Error(`Scene object ${index + 1} has an invalid ${key} value.`);
-        }
-        return [key, coordinate];
-      })) as Record<ModelTransformKey, number>;
+      const transform = parseTransform(model.transform, `Scene object ${index + 1}`);
       return {
         name: model.name,
         filename: model.filename,

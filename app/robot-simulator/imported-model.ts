@@ -1,5 +1,10 @@
 export type ModelTransformKey = 'x' | 'y' | 'z' | 'rx' | 'ry' | 'rz';
 export type ModelFileFormat = 'stl' | 'step' | 'stp';
+export const ROBOT_MODEL_ID = 0;
+
+export function createZeroModelTransform(): Record<ModelTransformKey, number> {
+  return { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+}
 
 export interface ModelAdjustment {
   key: ModelTransformKey;

@@ -30,20 +30,21 @@ export function SceneSaveDialog({ draft, onChange, onClose, onSave }: {
   </div>;
 }
 
-export function ObjectDialog({ draft, onChange, onClose, onSave }: {
+export function ObjectDialog({ draft, nameReadOnly = false, onChange, onClose, onSave }: {
   draft: ImportedModelDraft;
+  nameReadOnly?: boolean;
   onChange: Dispatch<SetStateAction<ImportedModelDraft | null>>;
   onClose: () => void;
   onSave: (model: ImportedModelDraft) => void;
 }) {
   return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <form className="plan-dialog" role="dialog" aria-modal="true" aria-labelledby="object-dialog-title" onSubmit={(event) => {
+    <form className="plan-dialog object-dialog" role="dialog" aria-modal="true" aria-labelledby="object-dialog-title" onSubmit={(event) => {
       event.preventDefault();
       onSave({ ...draft, name: draft.name.trim() || `Object${draft.id}` });
     }}>
       <header className="settings-header"><h2 id="object-dialog-title">Edit Object</h2><button className="modal-close" type="button" aria-label="Close object editor" onClick={onClose}>×</button></header>
       <div className="plan-dialog-body">
-        <label className="plan-dialog-name"><span>Name</span><input aria-label="Object name" value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
+        <label className="plan-dialog-name"><span>Name</span><input aria-label="Object name" value={draft.name} readOnly={nameReadOnly} onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
         <div className="plan-dialog-grid">
           {([['x', 'X', 'mm'], ['y', 'Y', 'mm'], ['z', 'Z', 'mm'], ['rx', 'θX', 'deg'], ['ry', 'θY', 'deg'], ['rz', 'θZ', 'deg']] as const).map(([key, label, unit]) => <label key={key}><span>{label}<small>{unit}</small></span><input aria-label={`Object ${label}`} type="number" step={key.startsWith('r') ? '0.1' : '0.01'} value={draft.transform[key]} onChange={(event) => onChange({ ...draft, transform: { ...draft.transform, [key]: Number(event.target.value) } })} /></label>)}
         </div>

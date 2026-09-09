@@ -21,6 +21,7 @@ test('serializes model data without transient object ids and parses it back', ()
   assert.equal(serialized.includes('"id"'), false);
   assert.deepEqual(parseImportedScene(JSON.parse(serialized)), {
     version: 1,
+    robotTransform: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
     models: [{
       name: MODEL.name,
       filename: MODEL.filename,
@@ -30,6 +31,15 @@ test('serializes model data without transient object ids and parses it back', ()
       transform: MODEL.transform,
     }],
   });
+});
+
+test('round-trips the AR4-MK5 position and orientation', () => {
+  const robotTransform = { x: 100, y: 200, z: 300, rx: 10, ry: 20, rz: 30 };
+  assert.deepEqual(parseImportedScene(JSON.parse(serializeImportedScene([], robotTransform))).robotTransform, robotTransform);
+});
+
+test('loads older scene files with the AR4-MK5 at world origin', () => {
+  assert.deepEqual(parseImportedScene({ version: 1, models: [] }).robotTransform, { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
 });
 
 test('rejects scene models with invalid transform values', () => {

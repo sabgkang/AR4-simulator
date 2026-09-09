@@ -16,7 +16,7 @@ import {
   TOOL_TIP_OFFSET,
 } from './config';
 import { setFrame } from './kinematics';
-import { modelFileExtension, type ImportedModelInfo, type ModelAdjustment, type ModelFileFormat, type ModelTransformKey } from './imported-model';
+import { modelFileExtension, ROBOT_MODEL_ID, type ImportedModelInfo, type ModelAdjustment, type ModelFileFormat, type ModelTransformKey } from './imported-model';
 import type { PlanTarget } from './types';
 
 function materialFor(name: string) {
@@ -119,6 +119,7 @@ export function useRobotScene(
   const controlsRef = useRef<OrbitControls | null>(null);
   const targetFramesRef = useRef<THREE.Group | null>(null);
   const importedRootRef = useRef<THREE.Group | null>(null);
+  const robotRootRef = useRef<THREE.Group | null>(null);
   const importedModelsRef = useRef(new Map<number, THREE.Group>());
   const nextImportedModelIdRef = useRef(1);
   const activeModelRef = useRef<THREE.Group | null>(null);
@@ -163,6 +164,13 @@ export function useRobotScene(
     importedRoot.name = 'Imported models';
     scene.add(importedRoot);
     importedRootRef.current = importedRoot;
+    const robotRoot = new THREE.Group();
+    robotRoot.name = 'AR4-MK5';
+    robotRoot.rotation.order = 'XYZ';
+    robotRoot.userData.importedModelId = ROBOT_MODEL_ID;
+    scene.add(robotRoot);
+    robotRootRef.current = robotRoot;
+    importedModelsRef.current.set(ROBOT_MODEL_ID, robotRoot);
 
     const camera = new THREE.PerspectiveCamera(34, 1, 0.01, 20);
     camera.position.set(1.05, -1.15, 0.78);
@@ -242,13 +250,13 @@ export function useRobotScene(
       }, undefined, () => setLoaded((value) => value + 1));
     };
 
-    loadMesh(scene, 'Link_Base_Aluminum.STL');
-    loadMesh(scene, 'Link_Base_Enclosure.STL');
-    loadMesh(scene, 'Link_Base_Motor.STL');
+    loadMesh(robotRoot, 'Link_Base_Aluminum.STL');
+    loadMesh(robotRoot, 'Link_Base_Enclosure.STL');
+    loadMesh(robotRoot, 'Link_Base_Motor.STL');
 
     jointRotors.current = [];
     axes.current = [];
-    let parent: THREE.Object3D = scene;
+    let parent: THREE.Object3D = robotRoot;
     JOINT_FRAMES.forEach((frame, index) => {
       const fixedFrame = new THREE.Group();
       setFrame(fixedFrame, frame.xyz, frame.rpy);
@@ -418,6 +426,7 @@ export function useRobotScene(
       canvas.removeEventListener('pointercancel', onPointerUp, true);
       targetFramesRef.current = null;
       importedRootRef.current = null;
+      robotRootRef.current = null;
       activeModelRef.current = null;
       importedModelsRef.current.clear();
       gizmoRef.current = null;
@@ -573,6 +582,7 @@ export function useRobotScene(
   }, []);
 
   const setImportedModelVisible = useCallback((id: number, visible: boolean) => {
+    if (id === ROBOT_MODEL_ID) return;
     const model = importedModelsRef.current.get(id);
     if (!model) return;
     model.visible = visible;
@@ -606,6 +616,7 @@ export function useRobotScene(
   }, []);
 
   const removeImportedModel = useCallback((id: number) => {
+    if (id === ROBOT_MODEL_ID) return;
     const model = importedModelsRef.current.get(id);
     if (!model) return;
     if (activeModelRef.current === model) selectImportedModel(null);
@@ -624,6 +635,7 @@ export function useRobotScene(
     axes,
     cameraRef,
     controlsRef,
+    robotRootRef,
     importModel,
     setImportedModelTransform,
     selectImportedModel,

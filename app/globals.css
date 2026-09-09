@@ -146,6 +146,7 @@ h2 { font-size:19px; }
 .plan-icon-button:hover { border-color:#aebff2; background:#f7f9ff; color:var(--blue); }
 .plan-icon-button.muted { color:#a7afbd; background:#f4f6f8; }
 .plan-icon-button.delete:hover { border-color:#f3b4ae; background:#fff5f4; color:#d92d20; }
+.plan-icon-placeholder { width:32px; height:32px; }
 .plan-item-copy { min-width:0; }
 .plan-item-copy strong,.plan-item-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .plan-item-copy strong { color:#344054; font-size:15px; }
@@ -201,6 +202,7 @@ h2 { font-size:19px; }
 .plan-dialog input,.plan-dialog select { width:100%; height:41px; padding:0 10px; border:1px solid #d7dce4; border-radius:8px; background:#fff; color:#1d2939; font-family:var(--font-geist-mono),monospace; font-size:14px; outline:none; }
 .plan-dialog input:focus,.plan-dialog select:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(36,87,230,.1); }
 .scene-save-dialog input[readonly] { background:#f4f6f8; color:#667085; cursor:not-allowed; }
+.object-dialog input[readonly] { background:#f4f6f8; color:#667085; cursor:not-allowed; }
 .scene-save-error { margin-top:12px; padding:9px 11px; border-radius:8px; background:#fff0f0; color:#b42318; font-size:13px; }
 .plan-dialog-name { margin-bottom:18px; }
 .plan-dialog-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px 12px; }
