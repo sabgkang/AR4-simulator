@@ -56,6 +56,15 @@ h2 { font-size:19px; }
 .model-import-message.loading { color:#3157a4; border-color:#c9d7ff; }
 .model-import-message.success { color:#087553; border-color:#b8e6d2; }
 .model-import-message.error { color:#b42318; border-color:#f4c7c7; }
+.collision-message { position:absolute; top:18px; left:50%; z-index:6; max-width:min(560px,calc(100% - 36px)); transform:translateX(-50%); padding:9px 13px; border:1px solid #c9d7ff; border-radius:8px; background:rgba(255,255,255,.95); color:#3157a4; font-size:13px; font-weight:650; box-shadow:0 2px 8px rgba(17,24,39,.1); backdrop-filter:blur(8px); }
+.collision-message.error { color:#b42318; border-color:#f4c7c7; background:rgba(255,245,245,.96); }
+.collision-switches { position:absolute; right:18px; bottom:18px; z-index:5; display:grid; gap:7px; min-width:230px; padding:9px 11px; border:1px solid #d7dce4; border-radius:10px; background:rgba(255,255,255,.92); box-shadow:0 2px 8px rgba(17,24,39,.08); backdrop-filter:blur(8px); }
+.collision-switch-row { display:flex; align-items:center; justify-content:space-between; gap:14px; color:#475467; font-size:16px; font-weight:700; }
+.collision-switch { position:relative; width:48px; height:28px; flex:0 0 48px; padding:0; border:0; border-radius:999px; background:#c8c8ca; cursor:pointer; transition:background-color .16s ease; }
+.collision-switch i { position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(16,24,40,.18); transition:transform .16s ease; }
+.collision-switch.active { background:#348ff0; }
+.collision-switch.active i { transform:translateX(20px); }
+.collision-switch:disabled { opacity:.55; cursor:not-allowed; }
 .model-adjustment { position:fixed; z-index:20; display:grid; grid-template-columns:auto 110px auto; align-items:center; gap:7px; padding:7px 10px; border:1px solid #cfd6e2; border-radius:10px; background:rgba(255,255,255,.96); box-shadow:0 5px 18px rgba(17,24,39,.16); backdrop-filter:blur(8px); }
 .model-adjustment.dragging { pointer-events:none; }
 .model-adjustment label { color:#344054; font-weight:800; }

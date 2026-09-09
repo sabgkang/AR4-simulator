@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
@@ -16,6 +16,7 @@ import {
   TOOL_TIP_OFFSET,
 } from './config';
 import { setFrame } from './kinematics';
+import { CollisionWorld, type CollisionReport } from './collision';
 import { modelFileExtension, ROBOT_MODEL_ID, type ImportedModelInfo, type ModelAdjustment, type ModelFileFormat, type ModelTransformKey } from './imported-model';
 import type { PlanTarget } from './types';
 
@@ -37,6 +38,14 @@ const AXES = [
 const MODEL_AXIS_KEYS = ['x', 'y', 'z'] as const;
 const MODEL_ROTATION_KEYS = ['rx', 'ry', 'rz'] as const;
 const MODEL_UNITS_TO_METERS = 0.001;
+const ROBOT_MESH_COUNT = 3 + LINK_MESHES.reduce((total, meshes) => total + meshes.length, 0);
+
+type CollisionReadiness = 'loading' | 'ready' | 'error';
+type HighlightMaterial = THREE.Material & {
+  color?: THREE.Color;
+  emissive?: THREE.Color;
+  emissiveIntensity?: number;
+};
 
 function createModelGizmo(resources: Array<THREE.BufferGeometry | THREE.Material>) {
   const gizmo = new THREE.Group();
@@ -112,6 +121,8 @@ export function useRobotScene(
   setLoaded: Dispatch<SetStateAction<number>>,
   onModelAdjustment?: (adjustment: ModelAdjustment | null) => void,
   onModelSelectionChange?: (id: number | null) => void,
+  showCollisionBoxes = false,
+  collisionDetectionEnabled = true,
 ) {
   const jointRotors = useRef<THREE.Group[]>([]);
   const axes = useRef<THREE.Vector3[]>([]);
@@ -126,6 +137,18 @@ export function useRobotScene(
   const gizmoRef = useRef<THREE.Group | null>(null);
   const gizmoRotationRootRef = useRef<THREE.Group | null>(null);
   const importedResourcesRef = useRef<Array<THREE.BufferGeometry | THREE.Material>>([]);
+  const collisionWorldRef = useRef(new CollisionWorld());
+  const collisionBoxesRootRef = useRef<THREE.Group | null>(null);
+  const collisionBoxHelpersRef = useRef(new Map<string, THREE.Box3Helper>());
+  const collidingBodyIdsRef = useRef(new Set<string>());
+  const collisionReadinessRef = useRef<CollisionReadiness>('loading');
+  const [collisionReadiness, setCollisionReadiness] = useState<CollisionReadiness>('loading');
+  const highlightedMaterialsRef = useRef<Array<{
+    material: HighlightMaterial;
+    color?: THREE.Color;
+    emissive?: THREE.Color;
+    emissiveIntensity?: number;
+  }>>([]);
   const adjustmentCallbackRef = useRef(onModelAdjustment);
   const selectionCallbackRef = useRef(onModelSelectionChange);
 
@@ -150,8 +173,75 @@ export function useRobotScene(
     selectionCallbackRef.current?.(model ? id : null);
   }, []);
 
+  const clearCollisionHighlight = useCallback(() => {
+    highlightedMaterialsRef.current.forEach(({ material, color, emissive, emissiveIntensity }) => {
+      if (color && material.color) material.color.copy(color);
+      if (emissive && material.emissive) material.emissive.copy(emissive);
+      if (emissiveIntensity !== undefined) material.emissiveIntensity = emissiveIntensity;
+    });
+    highlightedMaterialsRef.current = [];
+    collidingBodyIdsRef.current.clear();
+    collisionBoxHelpersRef.current.forEach((helper) => {
+      const material = helper.material as THREE.LineBasicMaterial;
+      material.color.set(helper.userData.collisionKind === 'environment' ? 0xf59e0b : 0x22c55e);
+    });
+  }, []);
+
+  const setCollisionHighlight = useCallback((report: CollisionReport | null) => {
+    clearCollisionHighlight();
+    if (!report?.collided) return;
+    const bodyIds = new Set(report.hits.flatMap((hit) => [hit.bodyAId, hit.bodyBId]));
+    collidingBodyIdsRef.current = bodyIds;
+    collisionBoxHelpersRef.current.forEach((helper, bodyId) => {
+      const material = helper.material as THREE.LineBasicMaterial;
+      material.color.set(bodyIds.has(bodyId) ? 0xef4444 : helper.userData.collisionKind === 'environment' ? 0xf59e0b : 0x22c55e);
+    });
+    const seen = new Set<THREE.Material>();
+    collisionWorldRef.current.meshesForBodies(bodyIds).forEach((mesh) => {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      materials.forEach((source) => {
+        if (seen.has(source)) return;
+        seen.add(source);
+        const material = source as HighlightMaterial;
+        highlightedMaterialsRef.current.push({
+          material,
+          color: material.color?.clone(),
+          emissive: material.emissive?.clone(),
+          emissiveIntensity: material.emissiveIntensity,
+        });
+        material.color?.set(0xef4444);
+        material.emissive?.set(0x7f1d1d);
+        if (material.emissiveIntensity !== undefined) material.emissiveIntensity = Math.max(0.65, material.emissiveIntensity);
+      });
+    });
+  }, [clearCollisionHighlight]);
+
+  const checkCurrentCollision = useCallback((collectAll = false) => {
+    if (!collisionDetectionEnabled) return { collided: false, hits: [] };
+    if (collisionReadinessRef.current === 'loading') throw new Error('Collision model is still loading. Try again in a moment.');
+    if (collisionReadinessRef.current === 'error') throw new Error('Collision model could not be prepared because a robot mesh failed to load.');
+    return collisionWorldRef.current.detect({ collectAll });
+  }, [collisionDetectionEnabled]);
+
   useEffect(() => {
     if (!canvasRef.current) return;
+    const collisionWorld = collisionWorldRef.current;
+    const collisionBoxHelpers = collisionBoxHelpersRef.current;
+    collisionWorld.reset();
+    collisionReadinessRef.current = 'loading';
+    setCollisionReadiness('loading');
+    clearCollisionHighlight();
+    let robotMeshesSettled = 0;
+    let robotMeshFailures = 0;
+    let sceneActive = true;
+    const settleRobotCollisionMesh = (failed: boolean) => {
+      robotMeshesSettled += 1;
+      if (failed) robotMeshFailures += 1;
+      if (!sceneActive || robotMeshesSettled !== ROBOT_MESH_COUNT) return;
+      const readiness: CollisionReadiness = robotMeshFailures === 0 ? 'ready' : 'error';
+      collisionReadinessRef.current = readiness;
+      setCollisionReadiness(readiness);
+    };
     const canvas = canvasRef.current;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf4f6f9);
@@ -159,6 +249,11 @@ export function useRobotScene(
     const targetFrames = new THREE.Group();
     targetFrames.name = 'Plan targets';
     scene.add(targetFrames);
+    const collisionBoxesRoot = new THREE.Group();
+    collisionBoxesRoot.name = 'Collision boxes';
+    collisionBoxesRoot.visible = false;
+    scene.add(collisionBoxesRoot);
+    collisionBoxesRootRef.current = collisionBoxesRoot;
     targetFramesRef.current = targetFrames;
     const importedRoot = new THREE.Group();
     importedRoot.name = 'Imported models';
@@ -237,7 +332,12 @@ export function useRobotScene(
     });
     scene.add(baseFrame);
 
-    const loadMesh = (parent: THREE.Object3D, name: string, transform: { xyz: readonly number[]; rpy: readonly number[] } = { xyz: [0, 0, 0], rpy: [0, 0, 0] }) => {
+    const loadMesh = (
+      parent: THREE.Object3D,
+      name: string,
+      transform: { xyz: readonly number[]; rpy: readonly number[] } = { xyz: [0, 0, 0], rpy: [0, 0, 0] },
+      collisionBody?: { id: string; name: string; checkGround: boolean },
+    ) => {
       loader.load(MESH_ROOT + name, (geometry) => {
         geometry.computeVertexNormals();
         const material = materialFor(name);
@@ -245,14 +345,22 @@ export function useRobotScene(
         setFrame(mesh, transform.xyz, transform.rpy);
         mesh.castShadow = true; mesh.receiveShadow = true;
         parent.add(mesh);
+        if (collisionBody) {
+          collisionWorld.registerRobotMesh(collisionBody.id, collisionBody.name, mesh, collisionBody.checkGround);
+          settleRobotCollisionMesh(false);
+        }
         disposables.push(geometry, material);
         setLoaded((value) => value + 1);
-      }, undefined, () => setLoaded((value) => value + 1));
+      }, undefined, () => {
+        if (collisionBody) settleRobotCollisionMesh(true);
+        setLoaded((value) => value + 1);
+      });
     };
 
-    loadMesh(robotRoot, 'Link_Base_Aluminum.STL');
-    loadMesh(robotRoot, 'Link_Base_Enclosure.STL');
-    loadMesh(robotRoot, 'Link_Base_Motor.STL');
+    const baseCollisionBody = { id: 'robot-base', name: 'Base', checkGround: false };
+    loadMesh(robotRoot, 'Link_Base_Aluminum.STL', undefined, baseCollisionBody);
+    loadMesh(robotRoot, 'Link_Base_Enclosure.STL', undefined, baseCollisionBody);
+    loadMesh(robotRoot, 'Link_Base_Motor.STL', undefined, baseCollisionBody);
 
     jointRotors.current = [];
     axes.current = [];
@@ -265,7 +373,8 @@ export function useRobotScene(
       fixedFrame.add(rotor);
       jointRotors.current.push(rotor);
       axes.current.push(new THREE.Vector3(...frame.axis));
-      LINK_MESHES[index].forEach((name) => loadMesh(rotor, name, LINK_MESH_TRANSFORMS[index]));
+      const collisionBody = { id: `robot-link-${index + 1}`, name: `Link ${index + 1}`, checkGround: true };
+      LINK_MESHES[index].forEach((name) => loadMesh(rotor, name, LINK_MESH_TRANSFORMS[index], collisionBody));
       parent = rotor;
     });
 
@@ -415,27 +524,77 @@ export function useRobotScene(
     observer.observe(canvas.parentElement ?? canvas);
     resize();
     let frameId = 0;
-    const render = () => { controls.update(); renderer.render(scene, camera); frameId = requestAnimationFrame(render); };
+    const updateCollisionBoxes = () => {
+      if (!collisionBoxesRoot.visible) return;
+      const activeIds = new Set<string>();
+      collisionWorld.debugBounds().forEach((body) => {
+        activeIds.add(body.bodyId);
+        let helper = collisionBoxHelpers.get(body.bodyId);
+        if (!helper) {
+          const color = collidingBodyIdsRef.current.has(body.bodyId) ? 0xef4444 : body.kind === 'environment' ? 0xf59e0b : 0x22c55e;
+          helper = new THREE.Box3Helper(body.box.clone(), color);
+          helper.name = `Collision box: ${body.bodyName}`;
+          helper.userData.collisionKind = body.kind;
+          helper.renderOrder = 30;
+          (helper.material as THREE.LineBasicMaterial).depthTest = false;
+          collisionBoxHelpers.set(body.bodyId, helper);
+          collisionBoxesRoot.add(helper);
+        } else {
+          helper.box.copy(body.box);
+        }
+      });
+      collisionBoxHelpers.forEach((helper, bodyId) => {
+        if (activeIds.has(bodyId)) return;
+        helper.removeFromParent();
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+        collisionBoxHelpers.delete(bodyId);
+      });
+    };
+    const render = () => {
+      controls.update();
+      updateCollisionBoxes();
+      renderer.render(scene, camera);
+      frameId = requestAnimationFrame(render);
+    };
     render();
 
     return () => {
+      sceneActive = false;
       observer.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(frameId); controls.dispose(); renderer.dispose();
       canvas.removeEventListener('pointerdown', onPointerDown, true);
       canvas.removeEventListener('pointermove', onPointerMove, true);
       canvas.removeEventListener('pointerup', onPointerUp, true);
       canvas.removeEventListener('pointercancel', onPointerUp, true);
       targetFramesRef.current = null;
+      collisionBoxesRootRef.current = null;
       importedRootRef.current = null;
       robotRootRef.current = null;
       activeModelRef.current = null;
       importedModelsRef.current.clear();
       gizmoRef.current = null;
       gizmoRotationRootRef.current = null;
+      clearCollisionHighlight();
+      collisionWorld.reset();
+      collisionReadinessRef.current = 'loading';
+      collisionBoxHelpers.forEach((helper) => {
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+      });
+      collisionBoxHelpers.clear();
       disposables.forEach((item) => item.dispose());
       importedResourcesRef.current.forEach((item) => item.dispose());
       importedResourcesRef.current = [];
     };
-  }, [canvasRef, selectImportedModel, setLoaded]);
+  }, [canvasRef, clearCollisionHighlight, selectImportedModel, setLoaded]);
+
+  useEffect(() => {
+    if (collisionBoxesRootRef.current) collisionBoxesRootRef.current.visible = showCollisionBoxes;
+  }, [showCollisionBoxes]);
+
+  useEffect(() => {
+    if (!collisionDetectionEnabled) clearCollisionHighlight();
+  }, [clearCollisionHighlight, collisionDetectionEnabled]);
 
   useEffect(() => {
     const root = targetFramesRef.current;
@@ -557,6 +716,7 @@ export function useRobotScene(
     model.userData.importedModelId = id;
     root.add(model);
     importedModelsRef.current.set(id, model);
+    collisionWorldRef.current.registerEnvironment(id, name, model);
     gizmo.scale.setScalar(BASE_AXIS_LENGTH);
     selectImportedModel(id);
     return {
@@ -613,6 +773,7 @@ export function useRobotScene(
   const renameImportedModel = useCallback((id: number, name: string) => {
     const model = importedModelsRef.current.get(id);
     if (model) model.name = name;
+    collisionWorldRef.current.renameEnvironment(id, name);
   }, []);
 
   const removeImportedModel = useCallback((id: number) => {
@@ -620,6 +781,7 @@ export function useRobotScene(
     const model = importedModelsRef.current.get(id);
     if (!model) return;
     if (activeModelRef.current === model) selectImportedModel(null);
+    collisionWorldRef.current.unregisterEnvironment(id);
     model.removeFromParent();
     model.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
@@ -636,6 +798,9 @@ export function useRobotScene(
     cameraRef,
     controlsRef,
     robotRootRef,
+    collisionReadiness,
+    checkCurrentCollision,
+    setCollisionHighlight,
     importModel,
     setImportedModelTransform,
     selectImportedModel,

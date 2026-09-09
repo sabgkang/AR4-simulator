@@ -64,6 +64,10 @@ await window.ar4Simulator.executeCommand({
 
 The entry point accepts either an object or a JSON string. `hello` identifies the simulator. `get_position` returns J1–J9 in `j` and `[X, Y, Z, Theta_x, Theta_y, Theta_z]` in `pose`. `move_j` solves the Cartesian target and then performs a synchronized joint move. `move_l` plans one-unit Cartesian waypoints, solves each point continuously, and synchronizes J7–J9 with the path. `w` supports the Teensy wrist modes `F`, `N`, and `A`. `ramp` is optional: joint moves default to `10`, while `move_l` defaults to the firmware value `80`. Linear rounding above zero requires command-queue lookahead and is rejected until queued blending is implemented. `calibrate` is intentionally unavailable because it is a physical limit-switch homing operation. The returned promise resolves with a command response after the simulated movement finishes, or an `error` response if the command is invalid.
 
+## Collision detection
+
+Motion commands, plan execution, inverse kinematics, and manual joint changes are checked against the invisible ground plane at Z=0 and every visible imported STL or STEP object. The fixed robot base is allowed to rest on the ground. Imported objects are not checked against the ground, and AR4 links are not checked against one another because the configured joint limits define the supported self-collision-free range. Joint paths are sampled at no more than 0.5 degrees per sample; a collision rejects the motion and identifies the robot link and obstacle. The viewport switches independently control collision-box visualization and collision detection.
+
 ## Model assets
 
 AR4 MK5 mesh assets are sourced from the official Annin Robotics AR4 ROS Driver:

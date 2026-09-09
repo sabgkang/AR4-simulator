@@ -49,6 +49,7 @@ test('linear joint sequence reaches its quantized endpoint', () => {
   });
   const endpoint = motion.sample(motion.durationMs);
   assert.ok(Math.abs(endpoint[0] - 10) <= 1 / 88.888);
+  assert.deepEqual(motion.jointPath.at(-1), endpoint);
   assert.ok(motion.durationMs > 0);
 });
 

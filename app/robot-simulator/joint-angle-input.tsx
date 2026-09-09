@@ -7,7 +7,7 @@ export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
   min: number;
   max: number;
   disabled: boolean;
-  onChange: (value: number) => void;
+  onChange: (value: number) => boolean;
 }) {
   const formatAngle = (angle: number) => formatDisplayNumber(angle);
   const [draft, setDraft] = useState(formatAngle(value));
@@ -24,8 +24,8 @@ export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
     }
     const parsed = Number(draft);
     const next = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value;
-    onChange(next);
-    setDraft(formatAngle(next));
+    const accepted = onChange(next);
+    setDraft(formatAngle(accepted ? next : value));
   };
 
   return <span className="angle-input-wrap">
@@ -43,7 +43,9 @@ export function JointAngleInput({ name, value, min, max, disabled, onChange }: {
         const nextDraft = event.target.value;
         setDraft(nextDraft);
         const parsed = Number(nextDraft);
-        if (nextDraft !== '' && Number.isFinite(parsed) && parsed >= min && parsed <= max) onChange(parsed);
+        if (nextDraft !== '' && Number.isFinite(parsed) && parsed >= min && parsed <= max && !onChange(parsed)) {
+          setDraft(formatAngle(value));
+        }
       }}
       onBlur={() => { focused.current = false; commit(); }}
       onKeyDown={(event) => {

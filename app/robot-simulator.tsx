@@ -6,6 +6,7 @@ import { createJointMotion, DEFAULT_MAX_SPEEDS, type JointValues } from './teens
 import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint } from './teensy-linear-motion';
 import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
 import { AnglesPanel, CartesianPanel } from './robot-simulator/control-panels';
+import { buildCollisionPathSamples, formatCollisionMessage, type CollisionReport } from './robot-simulator/collision';
 import { createCommandsFilename, serializePlanCommands } from './robot-simulator/command-export';
 import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS, TOOL_TIP_OFFSET } from './robot-simulator/config';
 import { DevicePanel } from './robot-simulator/device-panel';
@@ -45,6 +46,7 @@ export default function RobotSimulator() {
   const externalAxesRef = useRef<[number, number, number]>([0, 0, 0]);
   const runningRef = useRef(false);
   const planExecutionRef = useRef<'preview' | 'run' | null>(null);
+  const collisionMessageSourceRef = useRef<'current' | 'motion' | null>(null);
   const ikInitialized = useRef(false);
   const [angles, setAngles] = useState<Pose>(PRESETS.Home);
   const [tcp, setTcp] = useState<TcpPose>({ x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 });
@@ -90,6 +92,9 @@ export default function RobotSimulator() {
   const [selectedImportedModelId, setSelectedImportedModelId] = useState<number | null>(null);
   const [editingImportedModel, setEditingImportedModel] = useState<ImportedModelDraft | null>(null);
   const [sceneSaveDraft, setSceneSaveDraft] = useState<SceneSaveDraft | null>(null);
+  const [collisionMessage, setCollisionMessage] = useState<string | null>(null);
+  const [showCollisionBoxes, setShowCollisionBoxes] = useState(true);
+  const [collisionDetectionEnabled, setCollisionDetectionEnabled] = useState(true);
   const handleModelAdjustment = useCallback((adjustment: ModelAdjustment | null) => {
     setModelAdjustment(adjustment);
     if (adjustment) {
@@ -112,6 +117,9 @@ export default function RobotSimulator() {
     cameraRef,
     controlsRef,
     robotRootRef,
+    collisionReadiness,
+    checkCurrentCollision,
+    setCollisionHighlight,
     importModel,
     setImportedModelTransform,
     selectImportedModel,
@@ -120,7 +128,15 @@ export default function RobotSimulator() {
     getImportedModelTransform,
     renameImportedModel,
     removeImportedModel,
-  } = useRobotScene(canvasRef, planTargets, setLoaded, handleModelAdjustment, handleModelSelectionChange);
+  } = useRobotScene(
+    canvasRef,
+    planTargets,
+    setLoaded,
+    handleModelAdjustment,
+    handleModelSelectionChange,
+    showCollisionBoxes,
+    collisionDetectionEnabled,
+  );
 
   const loadModelFile = useCallback(async (file: File) => {
     if (!isSupportedModelFile(file)) {
@@ -485,6 +501,51 @@ export default function RobotSimulator() {
     setTcp(nextTcp);
   }, [jointRotors]);
 
+  const reportCollision = useCallback((report: CollisionReport, progress?: number, source: 'current' | 'motion' = 'motion') => {
+    const hit = report.hits[0];
+    if (!hit) return null;
+    const message = formatCollisionMessage(hit, progress);
+    collisionMessageSourceRef.current = source;
+    setCollisionMessage(message);
+    setCollisionHighlight(report);
+    return message;
+  }, [setCollisionHighlight]);
+
+  const checkCollisionForJoints = useCallback((jointValues: Pose, collectAll = false) => {
+    if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
+      throw new Error('The robot model is still loading. Try again in a moment.');
+    }
+    const savedRotations = jointRotors.current.map((rotor) => rotor.quaternion.clone());
+    try {
+      jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
+        axes.current[index],
+        THREE.MathUtils.degToRad(jointValues[index]) + JOINT_ZERO_OFFSETS[index],
+      ));
+      jointRotors.current[0].updateWorldMatrix(true, true);
+      return checkCurrentCollision(collectAll);
+    } finally {
+      jointRotors.current.forEach((rotor, index) => rotor.quaternion.copy(savedRotations[index]));
+      jointRotors.current[0].updateWorldMatrix(true, true);
+    }
+  }, [axes, checkCurrentCollision, jointRotors]);
+
+  const validateCollisionPath = useCallback(async (path: readonly (readonly number[])[]) => {
+    const samples = buildCollisionPathSamples(path);
+    for (let index = 0; index < samples.length; index += 1) {
+      const sample = samples[index];
+      const report = checkCollisionForJoints(sample.joints.slice(0, 6) as Pose);
+      if (report.collided) {
+        throw new Error(reportCollision(report, sample.progress) ?? 'Collision detected.');
+      }
+      if ((index + 1) % 25 === 0) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    }
+    collisionMessageSourceRef.current = null;
+    setCollisionMessage(null);
+    setCollisionHighlight(null);
+  }, [checkCollisionForJoints, reportCollision, setCollisionHighlight]);
+
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const getPoseForJoints = useCallback((jointValues: Pose) => {
     if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
@@ -565,41 +626,106 @@ export default function RobotSimulator() {
     return () => cancelAnimationFrame(frame);
   }, [loaded, robotTransform, updateTcp]);
 
+  useEffect(() => {
+    if (!collisionDetectionEnabled) {
+      collisionMessageSourceRef.current = null;
+      setCollisionMessage(null);
+      setCollisionHighlight(null);
+      return;
+    }
+    if (collisionReadiness !== 'ready' || running) return;
+    const frame = requestAnimationFrame(() => {
+      try {
+        const report = checkCurrentCollision(true);
+        if (report.collided) reportCollision(report, undefined, 'current');
+        else if (collisionMessageSourceRef.current === 'current') {
+          collisionMessageSourceRef.current = null;
+          setCollisionMessage(null);
+          setCollisionHighlight(null);
+        }
+      } catch (error) {
+        setCollisionMessage(error instanceof Error ? error.message : 'Collision check failed.');
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [angles, checkCurrentCollision, collisionDetectionEnabled, collisionReadiness, importedModels, reportCollision, robotTransform, running, setCollisionHighlight]);
+
   const setJoint = (index: number, value: number) => {
-    if (runningRef.current) return;
+    if (runningRef.current) return false;
     const range = jointRanges[index];
     const safeValue = Math.min(range.max, Math.max(range.min, value));
-    setAngles((current) => current.map((angle, i) => i === index ? safeValue : angle) as Pose);
+    const next = anglesRef.current.map((angle, i) => i === index ? safeValue : angle) as Pose;
+    try {
+      const report = checkCollisionForJoints(next);
+      if (report.collided) {
+        reportCollision(report);
+        setAngles([...anglesRef.current] as Pose);
+        return false;
+      }
+      collisionMessageSourceRef.current = null;
+      setCollisionMessage(null);
+      setCollisionHighlight(null);
+      setAngles(next);
+      return true;
+    } catch (error) {
+      setCollisionMessage(error instanceof Error ? error.message : 'Collision check failed.');
+      setAngles([...anglesRef.current] as Pose);
+      return false;
+    }
   };
 
-  const moveToAsync = (target: Pose) => new Promise<void>((resolve, reject) => {
+  const moveToAsync = async (target: Pose) => {
     if (runningRef.current) {
-      reject(new Error('The robot is already moving.'));
-      return;
+      throw new Error('The robot is already moving.');
     }
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     const safeTarget = target.map((value, index) => Math.min(jointRanges[index].max, Math.max(jointRanges[index].min, value))) as Pose;
     const start = [...anglesRef.current] as Pose;
+    await validateCollisionPath([start, safeTarget]);
     const started = performance.now(), duration = 700;
     runningRef.current = true;
     setRunning(true);
-    const step = (now: number) => {
-      const raw = Math.min((now - started) / duration, 1), eased = 1 - Math.pow(1 - raw, 3);
-      const next = start.map((value, i) => value + (safeTarget[i] - value) * eased) as Pose;
-      anglesRef.current = next;
-      setAngles(next);
-      if (raw < 1) animationRef.current = requestAnimationFrame(step); else {
+    let lastSafe = start;
+    await new Promise<void>((resolve, reject) => {
+      const stopWithError = (error: unknown) => {
+        anglesRef.current = lastSafe;
+        setAngles(lastSafe);
         runningRef.current = false;
         setRunning(false);
-        resolve();
-      }
-    };
-    animationRef.current = requestAnimationFrame(step);
-  });
+        reject(error instanceof Error ? error : new Error('Collision check failed.'));
+      };
+      const step = (now: number) => {
+        const raw = Math.min((now - started) / duration, 1), eased = 1 - Math.pow(1 - raw, 3);
+        const next = start.map((value, i) => value + (safeTarget[i] - value) * eased) as Pose;
+        try {
+          const report = checkCollisionForJoints(next);
+          if (report.collided) {
+            const message = reportCollision(report, raw) ?? 'Collision detected.';
+            stopWithError(new Error(message));
+            return;
+          }
+        } catch (error) {
+          stopWithError(error);
+          return;
+        }
+        lastSafe = next;
+        anglesRef.current = next;
+        setAngles(next);
+        if (raw < 1) animationRef.current = requestAnimationFrame(step); else {
+          runningRef.current = false;
+          setRunning(false);
+          resolve();
+        }
+      };
+      animationRef.current = requestAnimationFrame(step);
+    });
+  };
 
   const moveTo = (target: Pose) => {
     if (runningRef.current) return;
-    void moveToAsync(target);
+    void moveToAsync(target).catch((error) => {
+      setIkMessage({ type: 'error', text: error instanceof Error ? error.message : 'Motion failed.' });
+    });
   };
 
   const solvePose = useCallback((values: Pose, wristConfiguration = 'A', referenceJoints: Pose = anglesRef.current, preferContinuation = false) => {
@@ -713,6 +839,10 @@ export default function RobotSimulator() {
       const wrist = wristConfiguration.trim().toUpperCase().charAt(0) || 'A';
       const currentWristSign = Math.abs(startingDegrees[4]) > 0.5 ? Math.sign(startingDegrees[4]) : 1;
       const desiredWristSign = wrist === 'F' ? 1 : wrist === 'N' ? -1 : currentWristSign;
+      const isCandidateCollisionFree = (candidate: ReturnType<typeof attempt>) => {
+        applyRadians(candidate.joints);
+        return !checkCurrentCollision().collided;
+      };
       const evaluateCandidate = (candidate: ReturnType<typeof attempt>) => {
         const degrees = candidate.joints.map(THREE.MathUtils.radToDeg) as Pose;
         const absoluteJ5 = Math.abs(degrees[4]);
@@ -733,7 +863,7 @@ export default function RobotSimulator() {
       };
 
       const continuation = attempt(startingRadians);
-      const continued = continuation.solved ? evaluateCandidate(continuation) : null;
+      const continued = continuation.solved && isCandidateCollisionFree(continuation) ? evaluateCandidate(continuation) : null;
       if (preferContinuation && continued) {
         return {
           joints: continued.degrees,
@@ -753,9 +883,13 @@ export default function RobotSimulator() {
         throw new Error('No IK solution was found within the configured joint limits. Try a closer position or a different orientation.');
       }
 
-      const candidates = solved.map(evaluateCandidate).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+      const collisionFree = solved.filter(isCandidateCollisionFree);
+      if (collisionFree.length === 0) {
+        throw new Error('IK solutions were found, but all of them collide with the ground or an imported object.');
+      }
+      const candidates = collisionFree.map(evaluateCandidate).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
 
-      const fallback = solved.map((candidate) => ({
+      const fallback = collisionFree.map((candidate) => ({
         candidate,
         degrees: candidate.joints.map(THREE.MathUtils.radToDeg) as Pose,
         cost: candidate.joints.reduce((total, value, joint) =>
@@ -772,7 +906,7 @@ export default function RobotSimulator() {
     } finally {
       applyRadians(displayedRadians);
     }
-  }, [axes, jointRanges, jointRotors, robotRootRef]);
+  }, [axes, checkCurrentCollision, jointRanges, jointRotors, robotRootRef]);
 
   const solveInverseKinematics = () => {
     const keys: Array<keyof IkTarget> = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
@@ -1010,6 +1144,7 @@ export default function RobotSimulator() {
 
         let target: JointValues;
         let motion: { durationMs: number; sample: (elapsedMs: number) => JointValues };
+        let collisionPath: JointValues[];
         const start = [...anglesRef.current, ...externalAxesRef.current] as JointValues;
         const configuredMaxSpeeds = [...motorSpeeds, ...DEFAULT_MAX_SPEEDS.slice(6)] as JointValues;
         if (command.cmd === 'move_joints') {
@@ -1026,6 +1161,7 @@ export default function RobotSimulator() {
             decelerationPercent: command.dec ?? decelerationPercent,
             ramp: command.ramp ?? 10,
           });
+          collisionPath = [start, target];
         } else if (command.cmd === 'move_j') {
           if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
             throw new Error('move_j requires six finite pose values.');
@@ -1041,6 +1177,7 @@ export default function RobotSimulator() {
             decelerationPercent: command.dec ?? decelerationPercent,
             ramp: command.ramp ?? 10,
           });
+          collisionPath = [start, target];
         } else {
           if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
             throw new Error('move_l requires six finite pose values.');
@@ -1089,7 +1226,7 @@ export default function RobotSimulator() {
               await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
             }
           }
-          motion = createLinearMotionSequence({
+          const linearMotion = createLinearMotionSequence({
             start,
             waypoints: jointWaypoints,
             maxSpeeds: configuredMaxSpeeds,
@@ -1098,7 +1235,9 @@ export default function RobotSimulator() {
             decelerationPercent: linearDeceleration,
             ramp: linearRamp,
           });
+          motion = linearMotion;
           target = motion.sample(motion.durationMs);
+          collisionPath = [start, ...linearMotion.jointPath];
         }
 
         for (let index = 0; index < 6; index += 1) {
@@ -1113,6 +1252,8 @@ export default function RobotSimulator() {
           }
         }
 
+        await validateCollisionPath(collisionPath);
+
         if (motion.durationMs === 0) {
           runningRef.current = false;
           setRunning(false);
@@ -1126,10 +1267,25 @@ export default function RobotSimulator() {
         runningRef.current = true;
         setRunning(true);
         const started = performance.now();
-        await new Promise<void>((resolve) => {
+        let lastSafeJoints = [...anglesRef.current] as Pose;
+        await new Promise<void>((resolve, reject) => {
           const animate = (now: number) => {
             const values = motion.sample(now - started);
             const robotJoints = values.slice(0, 6) as Pose;
+            try {
+              const collision = checkCollisionForJoints(robotJoints);
+              if (collision.collided) {
+                const message = reportCollision(collision, Math.min(1, (now - started) / motion.durationMs));
+                anglesRef.current = lastSafeJoints;
+                setAngles(lastSafeJoints);
+                reject(new Error(message ?? 'Collision detected.'));
+                return;
+              }
+            } catch (error) {
+              reject(error);
+              return;
+            }
+            lastSafeJoints = robotJoints;
             anglesRef.current = robotJoints;
             externalAxesRef.current = values.slice(6) as [number, number, number];
             setAngles(robotJoints);
@@ -1164,7 +1320,7 @@ export default function RobotSimulator() {
     return () => {
       delete window.ar4Simulator;
     };
-  }, [accelerationPercent, decelerationPercent, getPoseForJoints, jointRanges, jointRotors, motorSpeeds, solvePose, speedPercent]);
+  }, [accelerationPercent, checkCollisionForJoints, decelerationPercent, getPoseForJoints, jointRanges, jointRotors, motorSpeeds, reportCollision, solvePose, speedPercent, validateCollisionPath]);
 
   const runTestCommand = async (commandName: TestCommandName) => {
     const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
@@ -1253,6 +1409,9 @@ export default function RobotSimulator() {
             }}
           >
             <canvas ref={canvasRef} aria-label="Interactive 3D model of the AR4 MK5 robot" />
+            {collisionDetectionEnabled && (collisionReadiness !== 'ready' || collisionMessage) && <div className={`collision-message${collisionMessage ? ' error' : ''}`} role="status">
+              {collisionMessage ?? (collisionReadiness === 'loading' ? 'Preparing collision model…' : 'Collision model could not be prepared.')}
+            </div>}
             <input ref={modelFileInputRef} type="file" accept=".stl,.step,.stp,model/stl" hidden onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) void loadModelFile(file);
@@ -1277,6 +1436,31 @@ export default function RobotSimulator() {
               {modelAdjustment.phase === 'editing' && <small>Press Enter to confirm</small>}
             </div>}
             {modelDragActive && <div className="model-drop-overlay">Drop STL or STEP to import</div>}
+            <div className="collision-switches" aria-label="Collision controls">
+              <div className="collision-switch-row">
+                <span>Collision boxes</span>
+                <button
+                  className={`collision-switch${showCollisionBoxes ? ' active' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={showCollisionBoxes}
+                  aria-label="Collision boxes"
+                  onClick={() => setShowCollisionBoxes((visible) => !visible)}
+                ><i /></button>
+              </div>
+              <div className="collision-switch-row">
+                <span>Collision Detection</span>
+                <button
+                  className={`collision-switch${collisionDetectionEnabled ? ' active' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={collisionDetectionEnabled}
+                  aria-label="Collision Detection"
+                  disabled={running}
+                  onClick={() => setCollisionDetectionEnabled((enabled) => !enabled)}
+                ><i /></button>
+              </div>
+            </div>
             {Object.values(visiblePanels).some((visible) => !visible) && <div className="panel-reopeners" aria-label="Show hidden panels">
               {!visiblePanels.import && <button type="button" onClick={() => setPanelVisible('import', true)}><ImportIcon />IMPORT</button>}
               {!visiblePanels.plan && <button type="button" onClick={() => setPanelVisible('plan', true)}><ViewIcon />PLAN</button>}

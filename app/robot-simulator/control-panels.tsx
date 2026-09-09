@@ -10,7 +10,7 @@ export function AnglesPanel({ angles, jointRanges, displayOnly, onHide, onJointC
   jointRanges: JointRange[];
   displayOnly: boolean;
   onHide: () => void;
-  onJointChange: (index: number, value: number) => void;
+  onJointChange: (index: number, value: number) => boolean;
   onMove: (pose: Pose) => void;
 }) {
   return <aside className="control-panel">

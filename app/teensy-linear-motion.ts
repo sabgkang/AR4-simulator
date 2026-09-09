@@ -17,6 +17,7 @@ export type LinearJointWaypoint = {
 export type LinearMotionSequence = {
   durationMs: number;
   waypointCount: number;
+  jointPath: JointValues[];
   sample: (elapsedMs: number) => JointValues;
 };
 
@@ -149,5 +150,10 @@ export function createLinearMotionSequence(options: {
     return segment.motion.sample(elapsedMs - segment.startsAt);
   };
 
-  return { durationMs: elapsed, waypointCount: options.waypoints.length, sample };
+  return {
+    durationMs: elapsed,
+    waypointCount: options.waypoints.length,
+    jointPath: quantized.map(({ joints }) => [...joints] as JointValues),
+    sample,
+  };
 }
