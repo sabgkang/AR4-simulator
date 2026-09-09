@@ -10,7 +10,8 @@ import { createCommandsFilename, serializePlanCommands } from './robot-simulator
 import { DEFAULT_JOINT_RANGES, DEFAULT_MOTOR_SPEEDS, JOINT_ZERO_OFFSETS, PRESETS, TOOL_TIP_OFFSET } from './robot-simulator/config';
 import { DevicePanel } from './robot-simulator/device-panel';
 import { saveJsonFile } from './robot-simulator/file-io';
-import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
+import { DeleteIcon, EditIcon, ExportIcon, GearIcon, HiddenIcon, ImportIcon, LoadIcon, PlusIcon, PreviewIcon, RunIcon, SaveIcon, ViewIcon } from './robot-simulator/icons';
+import { formatModelAdjustmentValue, isSupportedModelFile, type ModelAdjustment } from './robot-simulator/imported-model';
 import { angularDifferenceDegrees, getTcpWorldQuaternion, rotationVector, solveLinearSystem } from './robot-simulator/kinematics';
 import { formatDisplayNumber } from './robot-simulator/number-format';
 import { chainPlanCommands, createPlanFilename, expandPlanCommands, isPlanMotionCommand, parsePlan, serializePlan } from './robot-simulator/plan';
@@ -33,6 +34,7 @@ export default function RobotSimulator() {
   const nextTargetIdRef = useRef(1);
   const nextCommandIdRef = useRef(1);
   const planFileInputRef = useRef<HTMLInputElement>(null);
+  const modelFileInputRef = useRef<HTMLInputElement>(null);
   const planLoadRequestRef = useRef(0);
   const settingsLoadRequestRef = useRef(0);
   const homeTargetInitializedRef = useRef(false);
@@ -77,7 +79,48 @@ export default function RobotSimulator() {
   const [planFilename, setPlanFilename] = useState<string | null>(null);
   const [planExecution, setPlanExecution] = useState<'preview' | 'run' | null>(null);
   const [planExecutionMessage, setPlanExecutionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const { jointRotors, axes, cameraRef, controlsRef } = useRobotScene(canvasRef, planTargets, setLoaded);
+  const [modelImportMessage, setModelImportMessage] = useState<{ type: 'loading' | 'success' | 'error'; text: string } | null>(null);
+  const [modelAdjustment, setModelAdjustment] = useState<ModelAdjustment | null>(null);
+  const [modelAdjustmentDraft, setModelAdjustmentDraft] = useState('0');
+  const [modelDragActive, setModelDragActive] = useState(false);
+  const handleModelAdjustment = useCallback((adjustment: ModelAdjustment | null) => {
+    setModelAdjustment(adjustment);
+    if (adjustment) setModelAdjustmentDraft(formatModelAdjustmentValue(adjustment.key, adjustment.value));
+  }, []);
+  const { jointRotors, axes, cameraRef, controlsRef, importModel, setImportedModelTransform } = useRobotScene(canvasRef, planTargets, setLoaded, handleModelAdjustment);
+
+  const loadModelFile = useCallback(async (file: File) => {
+    if (!isSupportedModelFile(file)) {
+      setModelImportMessage({ type: 'error', text: 'Only .stl, .step, and .stp files are supported.' });
+      return;
+    }
+    setModelImportMessage({ type: 'loading', text: `Importing ${file.name}…` });
+    try {
+      await importModel(file);
+      setModelImportMessage({ type: 'success', text: `${file.name} imported at world origin.` });
+    } catch (error) {
+      setModelImportMessage({ type: 'error', text: error instanceof Error ? error.message : 'Could not import this model.' });
+    }
+  }, [importModel]);
+
+  const confirmModelAdjustment = useCallback(() => {
+    if (!modelAdjustment) return;
+    const value = Number(modelAdjustmentDraft);
+    if (!Number.isFinite(value)) return;
+    setImportedModelTransform(modelAdjustment.key, value);
+    setModelAdjustment(null);
+  }, [modelAdjustment, modelAdjustmentDraft, setImportedModelTransform]);
+
+  useEffect(() => {
+    if (modelAdjustment?.phase !== 'editing') return;
+    const confirmOnEnter = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      confirmModelAdjustment();
+    };
+    window.addEventListener('keydown', confirmOnEnter);
+    return () => window.removeEventListener('keydown', confirmOnEnter);
+  }, [confirmModelAdjustment, modelAdjustment?.phase]);
 
   const applySettings = useCallback((settings: SimulatorSettings) => {
     setJointRanges(settings.jointRanges.map((range) => ({ ...range })));
@@ -432,7 +475,6 @@ export default function RobotSimulator() {
     void moveToAsync(target);
   };
 
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const solvePose = useCallback((values: Pose, wristConfiguration = 'A', referenceJoints: Pose = anglesRef.current, preferContinuation = false) => {
     if (jointRotors.current.length !== 6 || axes.current.length !== 6) {
       throw new Error('The robot model is still loading. Try again in a moment.');
@@ -987,8 +1029,11 @@ export default function RobotSimulator() {
       }
     };
 
+    // eslint-disable-next-line react-hooks/immutability -- this is the intentional public simulator bridge.
     window.ar4Simulator = { executeCommand };
-    return () => { delete window.ar4Simulator; };
+    return () => {
+      delete window.ar4Simulator;
+    };
   }, [accelerationPercent, decelerationPercent, getPoseForJoints, jointRanges, jointRotors, motorSpeeds, solvePose, speedPercent]);
 
   const runTestCommand = async (commandName: TestCommandName) => {
@@ -1065,8 +1110,44 @@ export default function RobotSimulator() {
         style={{ '--visible-panels': visiblePanelCount, '--visible-columns': visibleColumnCount } as React.CSSProperties}
       >
         <section className="viewport-card">
-          <div className="canvas-wrap">
+          <div
+            className={`canvas-wrap${modelDragActive ? ' model-drag-active' : ''}`}
+            onDragEnter={(event) => { event.preventDefault(); setModelDragActive(true); }}
+            onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setModelDragActive(true); }}
+            onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setModelDragActive(false); }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setModelDragActive(false);
+              const file = event.dataTransfer.files[0];
+              if (file) void loadModelFile(file);
+            }}
+          >
             <canvas ref={canvasRef} aria-label="Interactive 3D model of the AR4 MK5 robot" />
+            <input ref={modelFileInputRef} type="file" accept=".stl,.step,.stp,model/stl" hidden onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void loadModelFile(file);
+              event.target.value = '';
+            }} />
+            <button className="model-import-button" type="button" onClick={() => modelFileInputRef.current?.click()}><ImportIcon />Import</button>
+            {modelImportMessage && <div className={`model-import-message ${modelImportMessage.type}`} role="status">{modelImportMessage.text}</div>}
+            {modelAdjustment && <div
+              className={`model-adjustment ${modelAdjustment.phase}`}
+              style={{ left: modelAdjustment.cursorX + 16, top: modelAdjustment.cursorY + 12 }}
+            >
+              <label htmlFor="model-adjustment-value">{modelAdjustment.key.startsWith('r') ? `θ${modelAdjustment.key.slice(1)}` : modelAdjustment.key.toUpperCase()}</label>
+              <input
+                id="model-adjustment-value"
+                type="number"
+                step="any"
+                autoFocus={modelAdjustment.phase === 'editing'}
+                readOnly={modelAdjustment.phase === 'dragging'}
+                value={modelAdjustment.phase === 'dragging' ? formatModelAdjustmentValue(modelAdjustment.key, modelAdjustment.value) : modelAdjustmentDraft}
+                onChange={(event) => setModelAdjustmentDraft(event.target.value)}
+              />
+              <span>{modelAdjustment.key.startsWith('r') ? 'deg' : 'mm'}</span>
+              {modelAdjustment.phase === 'editing' && <small>Press Enter to confirm</small>}
+            </div>}
+            {modelDragActive && <div className="model-drop-overlay">Drop STL or STEP to import</div>}
             {Object.values(visiblePanels).some((visible) => !visible) && <div className="panel-reopeners" aria-label="Show hidden panels">
               {!visiblePanels.plan && <button type="button" onClick={() => setPanelVisible('plan', true)}><ViewIcon />PLAN</button>}
               {!visiblePanels.device && <button type="button" onClick={() => setPanelVisible('device', true)}><ViewIcon />DEVICE</button>}

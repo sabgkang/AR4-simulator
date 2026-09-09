@@ -1,4 +1,4 @@
-import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
@@ -16,6 +16,7 @@ import {
   TOOL_TIP_OFFSET,
 } from './config';
 import { setFrame } from './kinematics';
+import { modelFileExtension, type ImportedModelInfo, type ModelAdjustment, type ModelTransformKey } from './imported-model';
 import type { PlanTarget } from './types';
 
 function materialFor(name: string) {
@@ -33,12 +34,99 @@ const AXES = [
   { direction: new THREE.Vector3(0, 0, 1), color: 0x2563eb },
 ];
 
-export function useRobotScene(canvasRef: RefObject<HTMLCanvasElement | null>, planTargets: PlanTarget[], setLoaded: Dispatch<SetStateAction<number>>) {
+const MODEL_AXIS_KEYS = ['x', 'y', 'z'] as const;
+const MODEL_ROTATION_KEYS = ['rx', 'ry', 'rz'] as const;
+const MODEL_UNITS_TO_METERS = 0.001;
+
+function createModelGizmo(resources: Array<THREE.BufferGeometry | THREE.Material>) {
+  const gizmo = new THREE.Group();
+  gizmo.name = 'Imported model transform handles';
+  gizmo.scale.setScalar(BASE_AXIS_LENGTH);
+  const handles: THREE.Object3D[] = [];
+  const rotationRoot = new THREE.Group();
+  rotationRoot.name = 'Imported model rotation handles';
+  gizmo.add(rotationRoot);
+
+  AXES.forEach(({ direction, color }, index) => {
+    const axisKey = MODEL_AXIS_KEYS[index];
+    const material = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true, opacity: 0.96 });
+    const shaftGeometry = new THREE.CylinderGeometry(0.025, 0.025, 0.78, 12);
+    const headGeometry = new THREE.ConeGeometry(0.075, 0.22, 18);
+    const pickGeometry = new THREE.CylinderGeometry(0.1, 0.1, 1, 8);
+    const shaft = new THREE.Mesh(shaftGeometry, material);
+    const head = new THREE.Mesh(headGeometry, material);
+    const pick = new THREE.Mesh(pickGeometry, new THREE.MeshBasicMaterial({ visible: false }));
+    shaft.position.y = 0.39;
+    head.position.y = 0.89;
+    pick.position.y = 0.5;
+    const arrow = new THREE.Group();
+    arrow.add(shaft, head, pick);
+    arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+    pick.userData.transformKey = axisKey;
+    shaft.renderOrder = head.renderOrder = 40;
+    handles.push(pick);
+    gizmo.add(arrow);
+    resources.push(shaftGeometry, headGeometry, pickGeometry, material, pick.material as THREE.Material);
+
+    const arcStart = THREE.MathUtils.degToRad(index === 0 ? 110 : 20);
+    const arcAngle = THREE.MathUtils.degToRad(50);
+    const ringRadius = 0.7;
+    const ringGeometry = new THREE.TorusGeometry(ringRadius, 0.035, 10, 36, arcAngle);
+    const ringPickGeometry = new THREE.TorusGeometry(ringRadius, 0.1, 8, 28, arcAngle);
+    const curveHeadGeometry = new THREE.ConeGeometry(0.09, 0.18, 16);
+    const ring = new THREE.Mesh(ringGeometry, material);
+    const ringPick = new THREE.Mesh(ringPickGeometry, new THREE.MeshBasicMaterial({ visible: false }));
+    const curveHead = new THREE.Mesh(curveHeadGeometry, material);
+    curveHead.position.set(ringRadius * Math.cos(arcAngle), ringRadius * Math.sin(arcAngle), 0);
+    curveHead.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(-Math.sin(arcAngle), Math.cos(arcAngle), 0));
+    const arcGroup = new THREE.Group();
+    arcGroup.rotation.z = arcStart;
+    arcGroup.add(ring, ringPick, curveHead);
+    const ringGroup = new THREE.Group();
+    ringGroup.add(arcGroup);
+    if (index === 0) ringGroup.rotation.y = Math.PI / 2;
+    if (index === 1) ringGroup.rotation.x = Math.PI / 2;
+    ringPick.userData.transformKey = MODEL_ROTATION_KEYS[index];
+    ring.renderOrder = curveHead.renderOrder = 39;
+    handles.push(ringPick);
+    rotationRoot.add(ringGroup);
+    resources.push(ringGeometry, ringPickGeometry, curveHeadGeometry, ringPick.material as THREE.Material);
+  });
+  return { gizmo, handles, rotationRoot };
+}
+
+function importedTransform(model: THREE.Group): ImportedModelInfo['transform'] {
+  return {
+    x: model.position.x * 1000,
+    y: model.position.y * 1000,
+    z: model.position.z * 1000,
+    rx: THREE.MathUtils.radToDeg(model.rotation.x),
+    ry: THREE.MathUtils.radToDeg(model.rotation.y),
+    rz: THREE.MathUtils.radToDeg(model.rotation.z),
+  };
+}
+
+export function useRobotScene(
+  canvasRef: RefObject<HTMLCanvasElement | null>,
+  planTargets: PlanTarget[],
+  setLoaded: Dispatch<SetStateAction<number>>,
+  onModelAdjustment?: (adjustment: ModelAdjustment | null) => void,
+) {
   const jointRotors = useRef<THREE.Group[]>([]);
   const axes = useRef<THREE.Vector3[]>([]);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const targetFramesRef = useRef<THREE.Group | null>(null);
+  const importedRootRef = useRef<THREE.Group | null>(null);
+  const activeModelRef = useRef<THREE.Group | null>(null);
+  const gizmoRef = useRef<THREE.Group | null>(null);
+  const gizmoRotationRootRef = useRef<THREE.Group | null>(null);
+  const importedResourcesRef = useRef<Array<THREE.BufferGeometry | THREE.Material>>([]);
+  const adjustmentCallbackRef = useRef(onModelAdjustment);
+
+  useEffect(() => {
+    adjustmentCallbackRef.current = onModelAdjustment;
+  }, [onModelAdjustment]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -50,6 +138,10 @@ export function useRobotScene(canvasRef: RefObject<HTMLCanvasElement | null>, pl
     targetFrames.name = 'Plan targets';
     scene.add(targetFrames);
     targetFramesRef.current = targetFrames;
+    const importedRoot = new THREE.Group();
+    importedRoot.name = 'Imported models';
+    scene.add(importedRoot);
+    importedRootRef.current = importedRoot;
 
     const camera = new THREE.PerspectiveCamera(34, 1, 0.01, 20);
     camera.position.set(1.05, -1.15, 0.78);
@@ -180,6 +272,81 @@ export function useRobotScene(canvasRef: RefObject<HTMLCanvasElement | null>, pl
     jointRotors.current[5].add(tcpFrame);
     disposables.push(toolTipGeometry, toolTipMaterial);
 
+    const { gizmo, handles, rotationRoot } = createModelGizmo(disposables);
+    gizmo.visible = false;
+    scene.add(gizmo);
+    gizmoRef.current = gizmo;
+    gizmoRotationRootRef.current = rotationRoot;
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let drag: { key: ModelTransformKey; startX: number; startY: number; startValue: number; projectedPixels: number } | null = null;
+    const setPointer = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(pointer, camera);
+    };
+    const projectedAxisPixels = (key: ModelTransformKey) => {
+      const axisIndex = key === 'x' ? 0 : key === 'y' ? 1 : 2;
+      const arrowLength = gizmo.scale.x;
+      const origin = gizmo.position.clone().project(camera);
+      const end = gizmo.position.clone().add(AXES[axisIndex].direction.clone().multiplyScalar(arrowLength)).project(camera);
+      const rect = canvas.getBoundingClientRect();
+      return Math.max(12, Math.hypot((end.x - origin.x) * rect.width / 2, (end.y - origin.y) * rect.height / 2));
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!activeModelRef.current || !gizmo.visible || event.button !== 0) return;
+      setPointer(event);
+      const hit = raycaster.intersectObjects(handles, false)[0];
+      const key = hit?.object.userData.transformKey as ModelTransformKey | undefined;
+      if (!key) return;
+      event.preventDefault();
+      event.stopPropagation();
+      canvas.setPointerCapture(event.pointerId);
+      controls.enabled = false;
+      const current = importedTransform(activeModelRef.current)[key];
+      drag = { key, startX: event.clientX, startY: event.clientY, startValue: current, projectedPixels: projectedAxisPixels(key) };
+      adjustmentCallbackRef.current?.({ key, value: current, phase: 'dragging', cursorX: event.clientX, cursorY: event.clientY });
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const model = activeModelRef.current;
+      if (!drag || !model) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      let value: number;
+      if (drag.key.startsWith('r')) {
+        value = drag.startValue + (dx - dy) * 0.6;
+        model.rotation[drag.key.slice(1) as 'x' | 'y' | 'z'] = THREE.MathUtils.degToRad(value);
+        rotationRoot.quaternion.copy(model.quaternion);
+      } else {
+        const axisIndex = MODEL_AXIS_KEYS.indexOf(drag.key as 'x' | 'y' | 'z');
+        const origin = gizmo.position.clone().project(camera);
+        const end = gizmo.position.clone().add(AXES[axisIndex].direction.clone().multiplyScalar(0.15)).project(camera);
+        const screenX = end.x - origin.x;
+        const screenY = -(end.y - origin.y);
+        const length = Math.max(0.0001, Math.hypot(screenX, screenY));
+        const signedPixels = (dx * screenX + dy * screenY) / length;
+        const arrowLengthMm = gizmo.scale.x * 1000;
+        value = drag.startValue + signedPixels / drag.projectedPixels * arrowLengthMm;
+        model.position[drag.key as 'x' | 'y' | 'z'] = value / 1000;
+        gizmo.position.copy(model.position);
+      }
+      adjustmentCallbackRef.current?.({ key: drag.key, value, phase: 'dragging', cursorX: event.clientX, cursorY: event.clientY });
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (!drag) return;
+      const completed = drag;
+      drag = null;
+      controls.enabled = true;
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      const model = activeModelRef.current;
+      if (model) adjustmentCallbackRef.current?.({ key: completed.key, value: importedTransform(model)[completed.key], phase: 'editing', cursorX: event.clientX, cursorY: event.clientY });
+    };
+    canvas.addEventListener('pointerdown', onPointerDown, true);
+    canvas.addEventListener('pointermove', onPointerMove, true);
+    canvas.addEventListener('pointerup', onPointerUp, true);
+    canvas.addEventListener('pointercancel', onPointerUp, true);
+
     let resizeFrame = 0;
     let lastWidth = 0;
     let lastHeight = 0;
@@ -208,8 +375,18 @@ export function useRobotScene(canvasRef: RefObject<HTMLCanvasElement | null>, pl
 
     return () => {
       observer.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(frameId); controls.dispose(); renderer.dispose();
+      canvas.removeEventListener('pointerdown', onPointerDown, true);
+      canvas.removeEventListener('pointermove', onPointerMove, true);
+      canvas.removeEventListener('pointerup', onPointerUp, true);
+      canvas.removeEventListener('pointercancel', onPointerUp, true);
       targetFramesRef.current = null;
+      importedRootRef.current = null;
+      activeModelRef.current = null;
+      gizmoRef.current = null;
+      gizmoRotationRootRef.current = null;
       disposables.forEach((item) => item.dispose());
+      importedResourcesRef.current.forEach((item) => item.dispose());
+      importedResourcesRef.current = [];
     };
   }, [canvasRef, setLoaded]);
 
@@ -281,5 +458,74 @@ export function useRobotScene(canvasRef: RefObject<HTMLCanvasElement | null>, pl
     };
   }, [planTargets]);
 
-  return { jointRotors, axes, cameraRef, controlsRef };
+  const importModel = useCallback(async (file: File): Promise<ImportedModelInfo> => {
+    const root = importedRootRef.current;
+    const gizmo = gizmoRef.current;
+    if (!root || !gizmo) throw new Error('3D view is not ready yet.');
+    const extension = modelFileExtension(file);
+    if (!['stl', 'step', 'stp'].includes(extension)) throw new Error('Only STL and STEP files are supported.');
+
+    const buffer = await file.arrayBuffer();
+    const model = new THREE.Group();
+    model.name = file.name;
+    model.rotation.order = 'XYZ';
+    const content = new THREE.Group();
+    content.scale.setScalar(MODEL_UNITS_TO_METERS);
+    model.add(content);
+
+    if (extension === 'stl') {
+      const geometry = new STLLoader().parse(buffer);
+      geometry.computeVertexNormals();
+      const material = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.48, metalness: 0.22 });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      content.add(mesh);
+      importedResourcesRef.current.push(geometry, material);
+    } else {
+      const { default: createOcct } = await import('occt-import-js');
+      const occt = await createOcct({ locateFile: () => '/occt-import-js.wasm' });
+      const result = occt.ReadStepFile(new Uint8Array(buffer), { linearUnit: 'millimeter' });
+      if (!result.success || result.meshes.length === 0) throw new Error('The STEP file contains no readable geometry.');
+      result.meshes.forEach((source) => {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(source.attributes.position.array, 3));
+        if (source.attributes.normal) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(source.attributes.normal.array, 3));
+        else geometry.computeVertexNormals();
+        geometry.setIndex(new THREE.Uint32BufferAttribute(source.index.array, 1));
+        const color = source.color ? new THREE.Color(...source.color) : new THREE.Color(0x94a3b8);
+        const material = new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.2, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = source.name;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        content.add(mesh);
+        importedResourcesRef.current.push(geometry, material);
+      });
+    }
+
+    root.add(model);
+    activeModelRef.current = model;
+    gizmo.position.set(0, 0, 0);
+    gizmo.scale.setScalar(BASE_AXIS_LENGTH);
+    if (gizmoRotationRootRef.current) {
+      gizmoRotationRootRef.current.quaternion.copy(model.quaternion);
+    }
+    gizmo.visible = true;
+    adjustmentCallbackRef.current?.(null);
+    return { name: file.name, transform: importedTransform(model) };
+  }, []);
+
+  const setImportedModelTransform = useCallback((key: ModelTransformKey, value: number) => {
+    const model = activeModelRef.current;
+    const gizmo = gizmoRef.current;
+    if (!model || !Number.isFinite(value)) return;
+    if (key.startsWith('r')) model.rotation[key.slice(1) as 'x' | 'y' | 'z'] = THREE.MathUtils.degToRad(value);
+    else model.position[key as 'x' | 'y' | 'z'] = value / 1000;
+    if (gizmo) gizmo.position.copy(model.position);
+    if (gizmoRotationRootRef.current) gizmoRotationRootRef.current.quaternion.copy(model.quaternion);
+    adjustmentCallbackRef.current?.(null);
+  }, []);
+
+  return { jointRotors, axes, cameraRef, controlsRef, importModel, setImportedModelTransform };
 }
