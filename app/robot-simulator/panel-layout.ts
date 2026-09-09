@@ -1,6 +1,7 @@
 import type { PanelKey, PanelVisibility } from './types';
 
 export const DEFAULT_PANEL_VISIBILITY: PanelVisibility = {
+  import: false,
   plan: true,
   device: false,
   angles: true,

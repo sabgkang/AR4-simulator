@@ -1128,8 +1128,7 @@ export default function RobotSimulator() {
               if (file) void loadModelFile(file);
               event.target.value = '';
             }} />
-            <button className="model-import-button" type="button" onClick={() => modelFileInputRef.current?.click()}><ImportIcon />Import</button>
-            {modelImportMessage && <div className={`model-import-message ${modelImportMessage.type}`} role="status">{modelImportMessage.text}</div>}
+            {!visiblePanels.import && modelImportMessage?.type === 'error' && <div className="model-import-message error" role="status">{modelImportMessage.text}</div>}
             {modelAdjustment && <div
               className={`model-adjustment ${modelAdjustment.phase}`}
               style={{ left: modelAdjustment.cursorX + 16, top: modelAdjustment.cursorY + 12 }}
@@ -1149,10 +1148,11 @@ export default function RobotSimulator() {
             </div>}
             {modelDragActive && <div className="model-drop-overlay">Drop STL or STEP to import</div>}
             {Object.values(visiblePanels).some((visible) => !visible) && <div className="panel-reopeners" aria-label="Show hidden panels">
+              {!visiblePanels.import && <button type="button" onClick={() => setPanelVisible('import', true)}><ImportIcon />IMPORT</button>}
               {!visiblePanels.plan && <button type="button" onClick={() => setPanelVisible('plan', true)}><ViewIcon />PLAN</button>}
-              {!visiblePanels.device && <button type="button" onClick={() => setPanelVisible('device', true)}><ViewIcon />DEVICE</button>}
               {!visiblePanels.angles && <button type="button" onClick={() => setPanelVisible('angles', true)}><ViewIcon />ANGLES</button>}
               {!visiblePanels.cartesian && <button type="button" onClick={() => setPanelVisible('cartesian', true)}><ViewIcon />CARTESIAN</button>}
+              {!visiblePanels.device && <button type="button" onClick={() => setPanelVisible('device', true)}><ViewIcon />DEVICE</button>}
             </div>}
             <div className="orbit-hint">Drag to orbit · Scroll to zoom</div>
             <div className="axis-widget" aria-label="Standard plane views">
@@ -1175,6 +1175,19 @@ export default function RobotSimulator() {
             <div className="status-cell"><i /><strong>{running ? 'Moving' : 'Holding'}</strong></div>
           </div>
         </section>
+
+        {visiblePanels.import && <aside className="import-panel">
+          <div className="panel-heading">
+            <div className="panel-title"><button className="panel-visibility-button" type="button" title="Hide IMPORT" aria-label="Hide IMPORT column" onClick={() => setPanelVisible('import', false)}><HiddenIcon /></button><span className="eyebrow">IMPORT</span></div>
+            <div className="import-file-actions">
+              <button type="button" title="Import 3D model" onClick={() => modelFileInputRef.current?.click()}><ImportIcon /><span>Import</span></button>
+            </div>
+          </div>
+          <div className="import-content">
+            <p>Import an STL or STEP model, or drag and drop it into the 3D view.</p>
+            {modelImportMessage && <div className={`import-panel-message ${modelImportMessage.type}`} role="status">{modelImportMessage.text}</div>}
+          </div>
+        </aside>}
 
         {visiblePanels.plan && <aside className="plan-panel">
           <div className="panel-heading">
