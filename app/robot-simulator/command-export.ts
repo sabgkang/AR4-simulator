@@ -28,6 +28,17 @@ export function serializePlanCommands(targets: PlanTarget[], commands: PlanComma
       return { cmd: 'move_joints', j: command.joints.map(roundCommandNumber), ...profile };
     }
 
+    if (command.type === 'move_a' || command.type === 'move_c') {
+      const reference = targetsById.get(command.referenceTargetId ?? -1);
+      if (!reference) throw new Error(`${command.type} reference target was not found.`);
+      const targetValues = targetPose(target);
+      const referenceValues = targetPose(reference);
+      if (command.type === 'move_a') {
+        return { cmd: 'move_a', mid: referenceValues, end: targetValues.slice(0, 3), ...profile, ramp: 50, w: 'A' };
+      }
+      return { cmd: 'move_c', center: targetValues.slice(0, 3), plane: referenceValues.slice(0, 3), pose: targetValues.slice(3), ...profile, ramp: 50, w: 'A' };
+    }
+
     if (command.type === 'move_l') {
       return {
         cmd: 'move_l',

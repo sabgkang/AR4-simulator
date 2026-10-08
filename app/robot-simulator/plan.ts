@@ -1,7 +1,7 @@
 import type { PlanCommand, PlanMotionCommand, PlanTarget, TcpPose } from './types';
 
 export function isPlanMotionCommand(command: PlanCommand): command is PlanMotionCommand {
-  return command.type === 'move_joints' || command.type === 'move_j' || command.type === 'move_l';
+  return command.type === 'move_joints' || command.type === 'move_j' || command.type === 'move_l' || command.type === 'move_a' || command.type === 'move_c';
 }
 
 export function chainPlanCommands(commands: PlanCommand[], firstTargetId: number | null) {
@@ -9,7 +9,7 @@ export function chainPlanCommands(commands: PlanCommand[], firstTargetId: number
   return commands.map((command) => {
     if (!isPlanMotionCommand(command)) return command;
     const chained = { ...command, startTargetId };
-    startTargetId = chained.endTargetId;
+    if (chained.type !== 'move_c') startTargetId = chained.endTargetId;
     return chained;
   });
 }
@@ -65,10 +65,11 @@ export function parsePlan(value: unknown) {
     if (candidate.type === 'loop-end') return true;
     const hasValidJoints = candidate.type !== 'move_joints'
       || (Array.isArray(candidate.joints) && candidate.joints.length === 9 && candidate.joints.every((joint) => typeof joint === 'number' && Number.isFinite(joint)));
-    return (candidate.type === 'move_joints' || candidate.type === 'move_j' || candidate.type === 'move_l')
+    const hasValidReference = (candidate.type !== 'move_a' && candidate.type !== 'move_c') || targetIds.has(candidate.referenceTargetId ?? -1);
+    return (candidate.type === 'move_joints' || candidate.type === 'move_j' || candidate.type === 'move_l' || candidate.type === 'move_a' || candidate.type === 'move_c')
       && (candidate.startTargetId === null || targetIds.has(candidate.startTargetId ?? -1)) && targetIds.has(candidate.endTargetId ?? -1)
       && [candidate.speed, candidate.acceleration, candidate.deceleration].every((item) => typeof item === 'number' && Number.isFinite(item))
-      && hasValidJoints;
+      && hasValidJoints && hasValidReference;
   });
   if (targets.length !== parsed.targets.length || commands.length !== parsed.commands.length) {
     throw new Error('The plan contains invalid targets or commands.');

@@ -104,6 +104,9 @@ export function CommandDialog({ draft, targets, defaultJoints, onChange, onClose
     </div>;
   }
   if (draft.type === 'loop-end') return null;
+  const usesReferenceTarget = draft.type === 'move_a' || draft.type === 'move_c';
+  const endTargetLabel = draft.type === 'move_c' ? 'Center Target' : 'End Target';
+  const referenceTargetLabel = draft.type === 'move_a' ? 'Mid Target' : 'Plane Target';
 
   return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <form className="plan-dialog command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-dialog-title" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
@@ -111,11 +114,18 @@ export function CommandDialog({ draft, targets, defaultJoints, onChange, onClose
       <div className="plan-dialog-body">
         <div className="command-dialog-grid">
           <label><span>Start Target</span><input aria-label="Start target" value={draft.startTargetId === null ? 'Current position' : targets.find((target) => target.id === draft.startTargetId)?.name ?? 'Missing'} disabled /></label>
-          <label><span>End Target</span><select aria-label="End target" value={draft.endTargetId} onChange={(event) => onChange({ ...draft, endTargetId: Number(event.target.value) })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
+          <label><span>{endTargetLabel}</span><select aria-label={endTargetLabel} value={draft.endTargetId} onChange={(event) => onChange({ ...draft, endTargetId: Number(event.target.value) })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
+          {usesReferenceTarget && <label><span>{referenceTargetLabel}</span><select aria-label={referenceTargetLabel} value={draft.referenceTargetId ?? targets[0]?.id ?? ''} onChange={(event) => onChange({ ...draft, referenceTargetId: Number(event.target.value) })}>{targets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
           <label><span>Command</span><select aria-label="Command type" value={draft.type} onChange={(event) => {
             const type = event.target.value as PlanMotionCommand['type'];
-            onChange({ ...draft, type, joints: type === 'move_joints' ? draft.joints ?? [...defaultJoints] : draft.joints });
-          }}><option value="move_joints">move_joints</option><option value="move_j">move_j</option><option value="move_l">move_l</option></select></label>
+            const needsReference = type === 'move_a' || type === 'move_c';
+            onChange({
+              ...draft,
+              type,
+              joints: type === 'move_joints' ? draft.joints ?? [...defaultJoints] : draft.joints,
+              referenceTargetId: needsReference ? draft.referenceTargetId ?? targets.find((target) => target.id !== draft.endTargetId)?.id ?? draft.endTargetId : draft.referenceTargetId,
+            });
+          }}><option value="move_joints">move_joints</option><option value="move_j">move_j</option><option value="move_l">move_l</option><option value="move_a">move_a</option><option value="move_c">move_c</option></select></label>
           {([['speed', 'Speed'], ['acceleration', 'Acceleration'], ['deceleration', 'Deceleration']] as const).map(([key, label]) => <label key={key}><span>{label}<small>%</small></span><input aria-label={label} type="number" min="1" max="100" step="1" value={draft[key]} onChange={(event) => onChange({ ...draft, [key]: Math.min(100, Math.max(1, Number(event.target.value))) })} /></label>)}
         </div>
         {draft.type === 'move_joints' && <fieldset className="command-joints-grid">

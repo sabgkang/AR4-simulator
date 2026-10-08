@@ -36,6 +36,22 @@ test('command export expands loop blocks', () => {
   assert.equal(content.trim().split('\n').length, 2);
 });
 
+test('command export matches Teensy move_a and move_c fields', () => {
+  const content = serializePlanCommands(targets, [
+    { id: 10, type: 'move_a', startTargetId: null, referenceTargetId: 1, endTargetId: 2, speed: 20, acceleration: 10, deceleration: 10 },
+    { id: 11, type: 'move_c', startTargetId: 2, referenceTargetId: 2, endTargetId: 1, speed: 25, acceleration: 12, deceleration: 13 },
+  ]);
+  const commands = content.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(commands[0], {
+    cmd: 'move_a', mid: [315, 0, 450, 0, 135, 0], end: [300, 25, 425],
+    spd_type: 'percent', spd: 20, acc: 10, dec: 10, ramp: 50, w: 'A',
+  });
+  assert.deepEqual(commands[1], {
+    cmd: 'move_c', center: [315, 0, 450], plane: [300, 25, 425], pose: [0, 135, 0],
+    spd_type: 'percent', spd: 25, acc: 12, dec: 13, ramp: 50, w: 'A',
+  });
+});
+
 test('command export rejects missing targets', () => {
   assert.throws(() => serializePlanCommands([], [
     { id: 1, type: 'move_j', startTargetId: null, endTargetId: 99, speed: 15, acceleration: 10, deceleration: 10 },

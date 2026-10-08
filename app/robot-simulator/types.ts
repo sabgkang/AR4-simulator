@@ -9,12 +9,14 @@ export type SerialPortLike = { getInfo: () => { usbVendorId?: number; usbProduct
 export type MoveJointsCommand = { cmd: 'move_joints'; j: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number };
 export type MoveJCommand = { cmd: 'move_j'; pose: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
 export type MoveLCommand = { cmd: 'move_l'; pose: number[]; ext?: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; rounding?: number; w?: string };
-export type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand;
+export type MoveACommand = { cmd: 'move_a'; mid: number[]; end: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
+export type MoveCCommand = { cmd: 'move_c'; center: number[]; plane: number[]; pose: number[]; spd_type?: string; spd?: number; acc?: number; dec?: number; ramp?: number; w?: string };
+export type MotionCommand = MoveJointsCommand | MoveJCommand | MoveLCommand | MoveACommand | MoveCCommand;
 export type TestCommandName = MotionCommand['cmd'] | 'hello' | 'get_position';
 export type PanelKey = 'import' | 'plan' | 'device' | 'angles' | 'cartesian';
 export type PanelVisibility = Record<PanelKey, boolean>;
 export type PlanTarget = { id: number; name: string; pose: TcpPose; visible: boolean };
-export type PlanMotionCommand = { id: number; type: 'move_joints' | 'move_j' | 'move_l'; startTargetId: number | null; endTargetId: number; speed: number; acceleration: number; deceleration: number; joints?: number[] };
+export type PlanMotionCommand = { id: number; type: 'move_joints' | 'move_j' | 'move_l' | 'move_a' | 'move_c'; startTargetId: number | null; endTargetId: number; referenceTargetId?: number; speed: number; acceleration: number; deceleration: number; joints?: number[] };
 export type PlanLoopBeginCommand = { id: number; type: 'loop-begin'; count: number };
 export type PlanLoopEndCommand = { id: number; type: 'loop-end' };
 export type PlanCommand = PlanMotionCommand | PlanLoopBeginCommand | PlanLoopEndCommand;

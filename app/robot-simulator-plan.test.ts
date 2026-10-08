@@ -15,6 +15,16 @@ test('chainPlanCommands links each command to the previous destination', () => {
   assert.deepEqual(chainPlanCommands(commands, null).filter((command) => 'startTargetId' in command).map((command) => command.startTargetId), [null, 1]);
 });
 
+test('move_c returns to its start target when chaining the next command', () => {
+  const commands = [
+    { id: 1, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 },
+    { id: 2, type: 'move_c' as const, startTargetId: null, endTargetId: 2, referenceTargetId: 2, speed: 10, acceleration: 10, deceleration: 10 },
+    { id: 3, type: 'move_j' as const, startTargetId: null, endTargetId: 2, speed: 10, acceleration: 10, deceleration: 10 },
+  ];
+  const chained = chainPlanCommands(commands, null).filter((command) => 'startTargetId' in command);
+  assert.deepEqual(chained.map((command) => command.startTargetId), [null, 1, 1]);
+});
+
 test('expandPlanCommands repeats and nests loop blocks', () => {
   const first = { id: 1, type: 'move_j' as const, startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 };
   const second = { ...first, id: 2, endTargetId: 2 };
@@ -43,6 +53,13 @@ test('parsePlan rejects move_joints without nine finite joint values', () => {
   const command = { id: 1, type: 'move_joints', startTargetId: null, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 };
   assert.throws(() => parsePlan({ version: 1, targets, commands: [command] }), /invalid targets or commands/);
   assert.throws(() => parsePlan({ version: 1, targets, commands: [{ ...command, joints: [1, 2, 3] }] }), /invalid targets or commands/);
+});
+
+test('parsePlan accepts arc commands and rejects missing reference targets', () => {
+  const moveA = { id: 1, type: 'move_a', startTargetId: null, referenceTargetId: 1, endTargetId: 2, speed: 10, acceleration: 10, deceleration: 10 };
+  const moveC = { id: 2, type: 'move_c', startTargetId: 2, referenceTargetId: 2, endTargetId: 1, speed: 10, acceleration: 10, deceleration: 10 };
+  assert.deepEqual(parsePlan({ version: 1, targets, commands: [moveA, moveC] }).commands.map((command) => command.type), ['move_a', 'move_c']);
+  assert.throws(() => parsePlan({ version: 1, targets, commands: [{ ...moveA, referenceTargetId: 99 }] }), /invalid targets or commands/);
 });
 
 test('plan serialization preserves full numeric precision', () => {

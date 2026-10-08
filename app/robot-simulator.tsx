@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { createJointMotion, DEFAULT_MAX_SPEEDS, type JointValues } from './teensy-motion';
-import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint } from './teensy-linear-motion';
+import { buildArcThroughWaypoints, buildCircleWaypoints } from './teensy-arc-motion';
+import { buildLinearWaypoints, createLinearMotionSequence, type CartesianPose, type ExternalAxes, type LinearJointWaypoint, type LinearWaypoint } from './teensy-linear-motion';
 import { createPositionResponse, HELLO_RESPONSE, type TcpValues } from './simulator-protocol';
 import { AnglesPanel, CartesianPanel } from './robot-simulator/control-panels';
 import { buildCollisionPathSamples, formatCollisionMessage, type CollisionReport } from './robot-simulator/collision';
@@ -351,7 +352,7 @@ export default function RobotSimulator() {
     const remainingTargets = planTargets.filter((target) => target.id !== id);
     setPlanTargets(remainingTargets);
     setPlanCommands((current) => chainPlanCommands(
-      current.filter((command) => !isPlanMotionCommand(command) || (command.startTargetId !== id && command.endTargetId !== id)),
+      current.filter((command) => !isPlanMotionCommand(command) || (command.startTargetId !== id && command.endTargetId !== id && command.referenceTargetId !== id)),
       current.find(isPlanMotionCommand)?.startTargetId ?? null,
     ));
   };
@@ -383,6 +384,9 @@ export default function RobotSimulator() {
         acceleration: accelerationPercent,
         deceleration: decelerationPercent,
         ...(pendingCommandType === 'move_joints' ? { joints: [...anglesRef.current, ...externalAxesRef.current] } : {}),
+        ...(pendingCommandType === 'move_a' || pendingCommandType === 'move_c'
+          ? { referenceTargetId: planTargets.find((target) => target.id !== endTargetId)?.id ?? endTargetId }
+          : {}),
       };
       const next = [...current.slice(0, index + 1), inserted, ...current.slice(index + 1)];
       return chainPlanCommands(next, next.find(isPlanMotionCommand)?.startTargetId ?? null);
@@ -712,6 +716,16 @@ export default function RobotSimulator() {
         anglesRef.current = next;
         setAngles(next);
         if (raw < 1) animationRef.current = requestAnimationFrame(step); else {
+          // React applies joint transforms asynchronously. Synchronize the Three.js
+          // hierarchy and TCP before resolving so the next plan command cannot read
+          // the previous target's Cartesian pose.
+          jointRotors.current.forEach((rotor, index) => rotor.quaternion.setFromAxisAngle(
+            axes.current[index],
+            THREE.MathUtils.degToRad(next[index]) + JOINT_ZERO_OFFSETS[index],
+          ));
+          jointRotors.current[0]?.updateWorldMatrix(true, true);
+          updateTcp();
+          animationRef.current = null;
           runningRef.current = false;
           setRunning(false);
           resolve();
@@ -947,6 +961,30 @@ export default function RobotSimulator() {
     return [x, y, z, rx, ry, rz] as Pose;
   };
 
+  const createPlanMotionPayload = (command: PlanMotionCommand) => {
+    const targetPose = targetPoseArray(getPlanTarget(command.endTargetId));
+    const profile = {
+      spd_type: 'percent' as const,
+      spd: command.speed,
+      acc: command.acceleration,
+      dec: command.deceleration,
+      ramp: 50,
+    };
+    if (command.type === 'move_joints') {
+      if (!command.joints || command.joints.length !== 9) throw new Error('move_joints requires nine joint values.');
+      return { cmd: 'move_joints', j: command.joints, ...profile };
+    }
+    if (command.type === 'move_a' || command.type === 'move_c') {
+      if (command.referenceTargetId === undefined) throw new Error(`${command.type} requires a reference target.`);
+      const referencePose = targetPoseArray(getPlanTarget(command.referenceTargetId));
+      if (command.type === 'move_a') {
+        return { cmd: 'move_a', mid: referencePose, end: targetPose.slice(0, 3), w: 'A', ...profile };
+      }
+      return { cmd: 'move_c', center: targetPose.slice(0, 3), plane: referencePose.slice(0, 3), pose: targetPose.slice(3), w: 'A', ...profile };
+    }
+    return { cmd: command.type, pose: targetPose, ...(command.type === 'move_l' ? { ext: [0, 0, 0], rounding: 0 } : {}), w: 'A', ...profile };
+  };
+
   const previewPlan = async () => {
     if (planExecutionRef.current || runningRef.current || planCommands.length === 0) return;
     planExecutionRef.current = 'preview';
@@ -959,11 +997,19 @@ export default function RobotSimulator() {
         const startTarget = getPlanTarget(startTargetId);
         await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
       }
+      const executeCommand = window.ar4Simulator?.executeCommand;
       for (const command of commands) {
         const endTarget = getPlanTarget(command.endTargetId);
         if (command.type === 'move_joints') {
           if (!command.joints || command.joints.length !== 9) throw new Error('move_joints requires nine joint values.');
           await moveToAsync(command.joints.slice(0, 6) as Pose);
+        } else if (command.type === 'move_a' || command.type === 'move_c') {
+          if (!executeCommand) throw new Error('The simulator command API is not ready.');
+          const response = await executeCommand({
+            ...createPlanMotionPayload(command),
+            ...(command.type === 'move_a' ? { spd: 100, acc: 0, dec: 0, ramp: 100 } : {}),
+          });
+          if ('msg' in response && response.msg === 'error') throw new Error(response.data);
         } else {
           await moveToAsync(solvePose(targetPoseArray(endTarget)).joints);
         }
@@ -992,19 +1038,7 @@ export default function RobotSimulator() {
         await moveToAsync(solvePose(targetPoseArray(startTarget)).joints);
       }
       for (const command of commands) {
-        const endTarget = getPlanTarget(command.endTargetId);
-        if (command.type === 'move_joints' && (!command.joints || command.joints.length !== 9)) {
-          throw new Error('move_joints requires nine joint values.');
-        }
-        const response = await executeCommand({
-          cmd: command.type,
-          ...(command.type === 'move_joints' ? { j: command.joints } : { pose: targetPoseArray(endTarget) }),
-          spd_type: 'percent',
-          spd: command.speed,
-          acc: command.acceleration,
-          dec: command.deceleration,
-          ramp: 50,
-        });
+        const response = await executeCommand(createPlanMotionPayload(command));
         if ('msg' in response && response.msg === 'error') throw new Error(response.data);
       }
       setPlanExecutionMessage({ type: 'success', text: 'Plan completed.' });
@@ -1136,7 +1170,7 @@ export default function RobotSimulator() {
         if (runningRef.current) throw new Error('Robot is already moving.');
 
         const command = decodedCommand as MotionCommand;
-        if (command.cmd !== 'move_joints' && command.cmd !== 'move_j' && command.cmd !== 'move_l') throw new Error('Unsupported command.');
+        if (command.cmd !== 'move_joints' && command.cmd !== 'move_j' && command.cmd !== 'move_l' && command.cmd !== 'move_a' && command.cmd !== 'move_c') throw new Error('Unsupported command.');
         if (command.ramp !== undefined && !Number.isFinite(command.ramp)) throw new Error('ramp must be a finite number.');
         if ((command.spd_type ?? 'percent') !== 'percent') {
           throw new Error(`${command.cmd} currently supports spd_type "percent" only.`);
@@ -1179,18 +1213,6 @@ export default function RobotSimulator() {
           });
           collisionPath = [start, target];
         } else {
-          if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
-            throw new Error('move_l requires six finite pose values.');
-          }
-          if (command.ext !== undefined && (!Array.isArray(command.ext) || command.ext.length !== 3 || command.ext.some((value) => !Number.isFinite(value)))) {
-            throw new Error('move_l ext requires three finite values.');
-          }
-          if (command.rounding !== undefined && (!Number.isFinite(command.rounding) || command.rounding < 0)) {
-            throw new Error('rounding must be a non-negative finite number.');
-          }
-          if ((command.rounding ?? 0) > 0) {
-            throw new Error('move_l rounding greater than 0 requires command-queue lookahead and is not supported yet.');
-          }
           const linearSpeed = command.spd ?? speedPercent;
           const linearAcceleration = command.acc ?? accelerationPercent;
           const linearDeceleration = command.dec ?? decelerationPercent;
@@ -1204,14 +1226,48 @@ export default function RobotSimulator() {
           setRunning(true);
           const startTcp = tcpRef.current;
           const startPose: CartesianPose = [startTcp.x, startTcp.y, startTcp.z, startTcp.rx, startTcp.ry, startTcp.rz];
-          const targetPose = [...command.pose] as CartesianPose;
           const startExternal = [...externalAxesRef.current] as ExternalAxes;
-          const targetExternal = command.ext ? [...command.ext] as ExternalAxes : [...startExternal] as ExternalAxes;
+          let targetExternal = [...startExternal] as ExternalAxes;
+          let cartesianWaypoints: LinearWaypoint[];
+          if (command.cmd === 'move_l') {
+            if (!Array.isArray(command.pose) || command.pose.length !== 6 || command.pose.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_l requires six finite pose values.');
+            }
+            if (command.ext !== undefined && (!Array.isArray(command.ext) || command.ext.length !== 3 || command.ext.some((value) => !Number.isFinite(value)))) {
+              throw new Error('move_l ext requires three finite values.');
+            }
+            if (command.rounding !== undefined && (!Number.isFinite(command.rounding) || command.rounding < 0)) {
+              throw new Error('rounding must be a non-negative finite number.');
+            }
+            if ((command.rounding ?? 0) > 0) {
+              throw new Error('move_l rounding greater than 0 requires command-queue lookahead and is not supported yet.');
+            }
+            targetExternal = command.ext ? [...command.ext] as ExternalAxes : [...startExternal] as ExternalAxes;
+            cartesianWaypoints = buildLinearWaypoints(startPose, [...command.pose] as CartesianPose, startExternal, targetExternal);
+          } else if (command.cmd === 'move_a') {
+            if (!Array.isArray(command.mid) || command.mid.length !== 6 || command.mid.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_a requires six finite mid values.');
+            }
+            if (!Array.isArray(command.end) || command.end.length !== 3 || command.end.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_a requires three finite end values.');
+            }
+            cartesianWaypoints = buildArcThroughWaypoints(startPose, [...command.mid] as CartesianPose, [...command.end] as [number, number, number], startExternal);
+          } else {
+            if (!Array.isArray(command.center) || command.center.length !== 3 || command.center.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_c requires three finite center values.');
+            }
+            if (!Array.isArray(command.plane) || command.plane.length !== 3 || command.plane.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_c requires three finite plane values.');
+            }
+            if (!Array.isArray(command.pose) || command.pose.length !== 3 || command.pose.some((value) => !Number.isFinite(value))) {
+              throw new Error('move_c requires three finite orientation values.');
+            }
+            cartesianWaypoints = buildCircleWaypoints(startPose, [...command.center] as [number, number, number], [...command.plane] as [number, number, number], [...command.pose] as [number, number, number], startExternal);
+          }
           targetExternal.forEach((value, index) => {
             if (value < 0 || value > 3450) throw new Error(`J${index + 7} target is outside the firmware range 0 to 3450.`);
           });
 
-          const cartesianWaypoints = buildLinearWaypoints(startPose, targetPose, startExternal, targetExternal);
           const jointWaypoints: LinearJointWaypoint[] = [];
           let referenceJoints = [...anglesRef.current] as Pose;
           for (let index = 0; index < cartesianWaypoints.length; index += 1) {
@@ -1323,7 +1379,7 @@ export default function RobotSimulator() {
   }, [accelerationPercent, checkCollisionForJoints, decelerationPercent, getPoseForJoints, jointRanges, jointRotors, motorSpeeds, reportCollision, solvePose, speedPercent, validateCollisionPath]);
 
   const runTestCommand = async (commandName: TestCommandName) => {
-    const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
+    const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l' || commandName === 'move_a' || commandName === 'move_c';
     if ((isMotionCommand && runningRef.current) || (commandName !== 'hello' && loaded < 18)) return;
     const executeCommand = window.ar4Simulator?.executeCommand;
     if (!executeCommand) return;
@@ -1341,6 +1397,12 @@ export default function RobotSimulator() {
         command = { cmd: commandName };
       } else if (commandName === 'move_joints') {
         command = { cmd: 'move_joints', j: [0, 0, 0, 0, 0, 0, 0, 0, 0], ...profile };
+      } else if (commandName === 'move_a') {
+        const current = tcpRef.current;
+        command = { cmd: 'move_a', mid: [current.x + 10, current.y + 10, current.z, current.rx, current.ry, current.rz], end: [current.x + 20, current.y, current.z], w: 'A', ...profile };
+      } else if (commandName === 'move_c') {
+        const current = tcpRef.current;
+        command = { cmd: 'move_c', center: [current.x - 20, current.y, current.z], plane: [current.x - 20, current.y + 20, current.z], pose: [current.rx, current.ry, current.rz], w: 'A', ...profile };
       } else {
         const homePose = getPoseForJoints(PRESETS.Home);
         command = commandName === 'move_j'
@@ -1372,8 +1434,8 @@ export default function RobotSimulator() {
           )}
         </div>
         <div className="top-actions">
-          {(['hello', 'get_position', 'move_joints', 'move_j', 'move_l'] as TestCommandName[]).map((commandName) => {
-            const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l';
+          {(['hello', 'get_position', 'move_joints', 'move_j', 'move_l', 'move_a', 'move_c'] as TestCommandName[]).map((commandName) => {
+            const isMotionCommand = commandName === 'move_joints' || commandName === 'move_j' || commandName === 'move_l' || commandName === 'move_a' || commandName === 'move_c';
             return (
             <button
               className="command-test-button"
@@ -1613,10 +1675,12 @@ export default function RobotSimulator() {
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_joints')}>move_joints</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_j')}>move_j</button>
                         <button type="button" role="menuitem" onClick={() => addPlanCommand('move_l')}>move_l</button>
+                        <button type="button" role="menuitem" onClick={() => addPlanCommand('move_a')}>move_a</button>
+                        <button type="button" role="menuitem" onClick={() => addPlanCommand('move_c')}>move_c</button>
                         <button type="button" role="menuitem" onClick={() => addPlanLoopCommand('loop-begin')}>loop-begin</button>
                         <button type="button" role="menuitem" onClick={() => addPlanLoopCommand('loop-end')}>loop-end</button>
                       </> : <>
-                        <small>Select end target</small>
+                        <small>{pendingCommandType === 'move_c' ? 'Select center target' : 'Select end target'}</small>
                         {planTargets.filter((target) => target.id !== motionCommand?.endTargetId).map((target) => <button type="button" role="menuitem" key={target.id} onClick={() => addPlanCommandToTarget(target.id)}>{target.name}</button>)}
                         {planTargets.length < 2 && <small>Add another target first</small>}
                       </>}
